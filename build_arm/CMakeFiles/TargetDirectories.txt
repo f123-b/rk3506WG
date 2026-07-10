@@ -1,0 +1,3 @@
+/home/liziteng/rk3506_sdk/rk3506_linux6.1_sdk_v1.2.0_iot_evm/app/lvgl_demo/my_test/build_arm/CMakeFiles/my_test.dir
+/home/liziteng/rk3506_sdk/rk3506_linux6.1_sdk_v1.2.0_iot_evm/app/lvgl_demo/my_test/build_arm/CMakeFiles/edit_cache.dir
+/home/liziteng/rk3506_sdk/rk3506_linux6.1_sdk_v1.2.0_iot_evm/app/lvgl_demo/my_test/build_arm/CMakeFiles/rebuild_cache.dir
