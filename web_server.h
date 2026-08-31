@@ -2,11 +2,8 @@
  * @file    web_server.h
  * @brief   RK3506 嵌入式 HTTP 服务器 — REST API + Web 仪表盘
  *
- * API 端点:
- *   GET  /api/sensor/current           — 当前温湿度
- *   GET  /api/sensor/history?hours=24  — 历史数据 (JSON)
- *   GET  /api/system/info              — 系统信息
- *   GET  /                             — Web 仪表盘 (index.html)
+ * API 端点由 web_server.c 分发到 web/api_* 模块，包含当前数据、设备数据、
+ * 系统健康、状态汇总、静态文件和应用 OTA 接口；不包含历史数据接口。
  *
  * 使用 POSIX socket + 自定义 HTTP/1.0 解析器，零外部依赖
  */

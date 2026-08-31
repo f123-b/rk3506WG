@@ -19,9 +19,9 @@ void api_device_handle_list(int client_fd)
     data_point_t points[DATA_BUS_MAX_POINTS];
     int count = data_bus_get_all(points, DATA_BUS_MAX_POINTS);
 
-    char json[4096];
+    char json[16384];
     char *p = json;
-    int rem = sizeof(json) - 1;
+    int rem = (int)sizeof(json) - 1;
     int w;
 
     w = snprintf(p, rem, "{\"devices\":[");
@@ -59,9 +59,9 @@ static void output_source_devices(int client_fd, data_source_t source)
     data_point_t points[DATA_BUS_MAX_POINTS];
     int count = data_bus_get_by_source(source, points, DATA_BUS_MAX_POINTS);
 
-    char json[4096];
+    char json[16384];
     char *p = json;
-    int rem = sizeof(json) - 1;
+    int rem = (int)sizeof(json) - 1;
     int w;
 
     w = snprintf(p, rem, "{\"source\":\"%s\",\"count\":%d,\"devices\":[",

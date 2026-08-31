@@ -39,6 +39,7 @@ static drmModeModeInfo drm_mode;
 static uint32_t screen_width = 0;
 static uint32_t screen_height = 0;
 static uint32_t drm_fb_id = 0;
+static uint32_t drm_handle = 0;
 static void *drm_fb_map = NULL;
 static size_t drm_fb_size = 0;
 
@@ -111,7 +112,7 @@ int hal_display_init(void)
     if (!drm_connector_id) {
         LOG_ERROR("No suitable display connector found");
         drmModeFreeResources(res);
-        close(drm_fd);
+        hal_display_deinit();
         return -1;
     }
 
@@ -120,7 +121,7 @@ int hal_display_init(void)
     } else {
         LOG_ERROR("No CRTC available");
         drmModeFreeResources(res);
-        close(drm_fd);
+        hal_display_deinit();
         return -1;
     }
     drmModeFreeResources(res);
@@ -133,16 +134,17 @@ int hal_display_init(void)
     create.flags = 0;
     if (drmIoctl(drm_fd, DRM_IOCTL_MODE_CREATE_DUMB, &create) < 0) {
         LOG_ERROR("DRM CREATE_DUMB failed: %s", strerror(errno));
-        close(drm_fd);
+        hal_display_deinit();
         return -1;
     }
     drm_fb_size = create.size;
+    drm_handle = create.handle;
 
     /* 步骤6: 添加 framebuffer */
     if (drmModeAddFB(drm_fd, screen_width, screen_height, 32, 32,
                      create.pitch, create.handle, &drm_fb_id) < 0) {
         LOG_ERROR("DRM AddFB failed: %s", strerror(errno));
-        close(drm_fd);
+        hal_display_deinit();
         return -1;
     }
 
@@ -151,14 +153,15 @@ int hal_display_init(void)
     map.handle = create.handle;
     if (drmIoctl(drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &map) < 0) {
         LOG_ERROR("DRM MAP_DUMB failed: %s", strerror(errno));
-        close(drm_fd);
+        hal_display_deinit();
         return -1;
     }
     drm_fb_map = mmap(NULL, drm_fb_size, PROT_READ | PROT_WRITE,
                       MAP_SHARED, drm_fd, map.offset);
     if (drm_fb_map == MAP_FAILED) {
         LOG_ERROR("mmap failed: %s", strerror(errno));
-        close(drm_fd);
+        drm_fb_map = NULL;
+        hal_display_deinit();
         return -1;
     }
 
@@ -169,7 +172,7 @@ int hal_display_init(void)
     if (drmModeSetCrtc(drm_fd, drm_crtc_id, drm_fb_id, 0, 0,
                        &drm_connector_id, 1, &drm_mode) < 0) {
         LOG_ERROR("DRM SetCrtc failed: %s", strerror(errno));
-        close(drm_fd);
+        hal_display_deinit();
         return -1;
     }
 
@@ -181,6 +184,33 @@ int hal_display_init(void)
 
     LOG_INFO("DRM: %dx%d DIRECT mode initialized", screen_width, screen_height);
     return 0;
+}
+
+void hal_display_deinit(void)
+{
+    if (drm_fb_map) {
+        munmap(drm_fb_map, drm_fb_size);
+        drm_fb_map = NULL;
+    }
+    if (drm_fd >= 0 && drm_fb_id != 0) {
+        drmModeRmFB(drm_fd, drm_fb_id);
+        drm_fb_id = 0;
+    }
+    if (drm_fd >= 0 && drm_handle != 0) {
+        struct drm_mode_destroy_dumb destroy = {0};
+        destroy.handle = drm_handle;
+        drmIoctl(drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy);
+        drm_handle = 0;
+    }
+    if (drm_fd >= 0) {
+        close(drm_fd);
+        drm_fd = -1;
+    }
+    drm_fb_size = 0;
+    drm_crtc_id = 0;
+    drm_connector_id = 0;
+    screen_width = 0;
+    screen_height = 0;
 }
 
 /* ==================== 访问器 ==================== */

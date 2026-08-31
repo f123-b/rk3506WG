@@ -48,6 +48,13 @@ static void *ota_download_thread(void *arg)
 /** GET /api/ota/check — 检查 OTA 更新 (线程安全) */
 void api_ota_handle_check(int client_fd)
 {
+    if (!ota_try_lock()) {
+        const char *busy = "{\"update_available\":false,\"error\":\"OTA busy\"}";
+        web_send_response(client_fd, 200, "application/json",
+                          busy, strlen(busy));
+        return;
+    }
+
     /* 先检查是否正在 OTA */
     ota_status_t st = ota_get_status();
     if (st == OTA_DOWNLOADING || st == OTA_VERIFYING ||
@@ -58,6 +65,7 @@ void api_ota_handle_check(int client_fd)
             "\"error\":\"OTA in progress, please wait\"}");
         web_send_response(client_fd, 200, "application/json",
                           json, strlen(json));
+        ota_unlock();
         return;
     }
 
@@ -89,7 +97,7 @@ void api_ota_handle_check(int client_fd)
             "\"force_update\":%s,"
             "\"has_delta\":%s"
             "}",
-            info.update_type[0] ? info.update_type : "firmware",
+            info.update_type[0] ? info.update_type : "app",
             info.version, info.build_date,
             (long long)info.size,
             escaped,
@@ -104,6 +112,7 @@ void api_ota_handle_check(int client_fd)
             ota_get_last_error_msg());
     }
 
+    ota_unlock();
     web_send_response(client_fd, 200, "application/json", json, strlen(json));
 }
 
@@ -155,7 +164,8 @@ void api_ota_handle_start(int client_fd, const char *body)
 
     /* 检查当前状态 */
     ota_status_t st = ota_get_status();
-    if (st == OTA_DOWNLOADING || st == OTA_VERIFYING || st == OTA_APPLYING) {
+    if (st == OTA_CHECKING || st == OTA_DOWNLOADING ||
+        st == OTA_VERIFYING || st == OTA_APPLYING || st == OTA_PATCHING) {
         ota_unlock();
         char json[128];
         snprintf(json, sizeof(json),

@@ -7,128 +7,115 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
+#include <cjson/cJSON.h>
 
-#define CONFIG_MAX_SIZE  8192   /**< 配置文件最大大小 */
-#define CONFIG_MAX_VALUE 256    /**< 单个值最大长度 */
+#define CONFIG_MAX_SIZE  8192
+#define CONFIG_MAX_VALUE 256
 
 struct config_file_t {
-    char *raw;  /**< 原始 JSON 文本 */
+    cJSON *root;
 };
 
 config_file_t *config_load(const char *path)
 {
-    FILE *fp = fopen(path, "r");
+    FILE *fp = fopen(path, "rb");
     if (!fp) return NULL;
 
-    config_file_t *cfg = calloc(1, sizeof(config_file_t));
-    if (!cfg) {
+    if (fseek(fp, 0, SEEK_END) != 0) {
         fclose(fp);
         return NULL;
     }
-
-    cfg->raw = calloc(1, CONFIG_MAX_SIZE);
-    if (!cfg->raw) {
-        free(cfg);
+    long size = ftell(fp);
+    if (size < 0 || size >= CONFIG_MAX_SIZE) {
         fclose(fp);
         return NULL;
     }
+    rewind(fp);
 
-    size_t n = fread(cfg->raw, 1, CONFIG_MAX_SIZE - 1, fp);
-    cfg->raw[n] = '\0';
+    char *raw = calloc(1, (size_t)size + 1);
+    if (!raw) {
+        fclose(fp);
+        return NULL;
+    }
+    size_t read_size = fread(raw, 1, (size_t)size, fp);
     fclose(fp);
+    if (read_size != (size_t)size) {
+        free(raw);
+        return NULL;
+    }
+
+    cJSON *root = cJSON_Parse(raw);
+    free(raw);
+    if (!root || !cJSON_IsObject(root)) {
+        cJSON_Delete(root);
+        return NULL;
+    }
+
+    config_file_t *cfg = calloc(1, sizeof(*cfg));
+    if (!cfg) {
+        cJSON_Delete(root);
+        return NULL;
+    }
+    cfg->root = root;
     return cfg;
 }
 
 void config_free(config_file_t *cfg)
 {
-    if (cfg) {
-        free(cfg->raw);
-        free(cfg);
-    }
+    if (!cfg) return;
+    cJSON_Delete(cfg->root);
+    free(cfg);
 }
 
-/**
- * @brief 在 JSON 文本中查找 key 对应的字符串值
- * @return 指向 value 字符串的静态缓冲区, 或 NULL
- */
-static const char *find_json_value(config_file_t *cfg, const char *key,
-                                   char *buf, size_t buf_size)
+static cJSON *find_json_value(config_file_t *cfg, const char *key)
 {
-    if (!cfg || !cfg->raw || !key) return NULL;
-
-    /* 构造搜索模式: "key" */
-    char pattern[128];
-    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-
-    char *pos = strstr(cfg->raw, pattern);
-    if (!pos) return NULL;
-
-    /* 跳过 key 和冒号 */
-    pos = strchr(pos + strlen(pattern), ':');
-    if (!pos) return NULL;
-    pos++;
-
-    /* 跳过空白 */
-    while (*pos && isspace((unsigned char)*pos)) pos++;
-
-    /* 判断类型: 字符串 "...", 数字, true/false */
-    if (*pos == '"') {
-        /* 字符串值 */
-        pos++;
-        const char *end = strchr(pos, '"');
-        if (!end) return NULL;
-        size_t len = (size_t)(end - pos);
-        if (len >= buf_size) len = buf_size - 1;
-        memcpy(buf, pos, len);
-        buf[len] = '\0';
-        return buf;
-    } else if (*pos == 't' || *pos == 'f') {
-        /* 布尔值 */
-        size_t len = (*pos == 't') ? 4 : 5;
-        if (len >= buf_size) len = buf_size - 1;
-        memcpy(buf, pos, len);
-        buf[len] = '\0';
-        return buf;
-    } else {
-        /* 数字值 */
-        const char *end = pos;
-        while (*end && (isdigit((unsigned char)*end) || *end == '.' ||
-                        *end == '-' || *end == '+')) end++;
-        size_t len = (size_t)(end - pos);
-        if (len >= buf_size) len = buf_size - 1;
-        memcpy(buf, pos, len);
-        buf[len] = '\0';
-        return buf;
-    }
+    if (!cfg || !cfg->root || !key) return NULL;
+    return cJSON_GetObjectItemCaseSensitive(cfg->root, key);
 }
 
 const char *config_get_str(config_file_t *cfg, const char *key,
                            const char *default_val)
 {
-    static char buf[CONFIG_MAX_VALUE];  /* 线程不安全, 嵌入式够用 */
-    const char *val = find_json_value(cfg, key, buf, sizeof(buf));
-    return val ? buf : default_val;
+    static _Thread_local char buf[CONFIG_MAX_VALUE];
+    cJSON *item = find_json_value(cfg, key);
+    if (!item || !cJSON_IsString(item) || !item->valuestring) {
+        return default_val;
+    }
+    snprintf(buf, sizeof(buf), "%s", item->valuestring);
+    return buf;
 }
 
 int config_get_int(config_file_t *cfg, const char *key, int default_val)
 {
-    static char buf[CONFIG_MAX_VALUE];
-    const char *val = find_json_value(cfg, key, buf, sizeof(buf));
-    return val ? atoi(val) : default_val;
+    cJSON *item = find_json_value(cfg, key);
+    if (cJSON_IsNumber(item)) return item->valueint;
+    if (cJSON_IsString(item) && item->valuestring) {
+        char *end = NULL;
+        long value = strtol(item->valuestring, &end, 10);
+        if (end != item->valuestring && *end == '\0') return (int)value;
+    }
+    return default_val;
 }
 
 float config_get_float(config_file_t *cfg, const char *key, float default_val)
 {
-    static char buf[CONFIG_MAX_VALUE];
-    const char *val = find_json_value(cfg, key, buf, sizeof(buf));
-    return val ? atof(val) : default_val;
+    cJSON *item = find_json_value(cfg, key);
+    if (cJSON_IsNumber(item)) return (float)item->valuedouble;
+    if (cJSON_IsString(item) && item->valuestring) {
+        char *end = NULL;
+        float value = strtof(item->valuestring, &end);
+        if (end != item->valuestring && *end == '\0') return value;
+    }
+    return default_val;
 }
 
 bool config_get_bool(config_file_t *cfg, const char *key, bool default_val)
 {
-    static char buf[CONFIG_MAX_VALUE];
-    const char *val = find_json_value(cfg, key, buf, sizeof(buf));
-    if (!val) return default_val;
-    return (strcmp(val, "true") == 0);
+    cJSON *item = find_json_value(cfg, key);
+    if (cJSON_IsBool(item)) return cJSON_IsTrue(item);
+    if (cJSON_IsString(item) && item->valuestring) {
+        if (strcmp(item->valuestring, "true") == 0) return true;
+        if (strcmp(item->valuestring, "false") == 0) return false;
+    }
+    return default_val;
 }

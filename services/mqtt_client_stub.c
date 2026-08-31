@@ -13,10 +13,11 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <time.h>
+#include <stdatomic.h>
 
 static mqtt_data_callback_t g_cb = NULL;
-static bool g_running = false;
-static bool g_connected = false;
+static atomic_bool g_running = false;
+static atomic_bool g_connected = false;
 static pthread_t g_thread;
 
 static void *sim_thread(void *arg)
@@ -24,8 +25,8 @@ static void *sim_thread(void *arg)
     (void)arg;
     float t = 25.0f;
     float phase = 0.0f;
-    while (g_running) {
-        g_connected = true;
+    while (atomic_load(&g_running)) {
+        atomic_store(&g_connected, true);
         /* 模拟温度: 正弦波 23~29℃ + 随机抖动，1秒更新一次 */
         phase += 0.15f;
         t = 25.5f + sinf(phase) * 2.5f + ((rand() % 100) - 50) * 0.03f;
@@ -46,7 +47,7 @@ int mqtt_client_init(const char *broker, int port, const char *topic,
 {
     (void)broker; (void)port; (void)topic;
     g_cb = cb;
-    g_running = true;
+    atomic_store(&g_running, true);
     srand((unsigned)time(NULL));
     pthread_create(&g_thread, NULL, sim_thread, NULL);
     LOG_INFO("MQTT stub: simulated sensor data, broker=%s", broker);
@@ -54,9 +55,14 @@ int mqtt_client_init(const char *broker, int port, const char *topic,
 }
 
 int mqtt_client_start(void) { return 0; }
-bool mqtt_client_is_connected(void) { return g_connected; }
+void mqtt_client_set_auth(const char *id, const char *secret)
+{
+    (void)id;
+    (void)secret;
+}
+bool mqtt_client_is_connected(void) { return atomic_load(&g_connected); }
 int  mqtt_client_get_retry_count(void) { return 0; }
-void mqtt_client_reconnect(void) { g_connected = true; }
+void mqtt_client_reconnect(void) { atomic_store(&g_connected, true); }
 void mqtt_client_retry_tick(void) { /* stub */ }
 
 int mqtt_client_publish(const char *topic, const char *payload, int qos, bool retain)
@@ -68,6 +74,6 @@ int mqtt_client_publish(const char *topic, const char *payload, int qos, bool re
 
 void mqtt_client_stop(void)
 {
-    g_running = false;
+    atomic_store(&g_running, false);
     if (g_thread) pthread_join(g_thread, NULL);
 }

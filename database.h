@@ -3,7 +3,7 @@
  * @brief   环境数据持久化 — SQLite3
  *
  * 功能:
- *   - 按分钟粒度存储温湿度记录
+ *   - 存储温湿度记录
  *   - 查询历史数据（按小时范围）
  *   - 数据清理（保留最近30天）
  *   - 统计查询（日均值、最高/最低）
@@ -45,6 +45,9 @@ typedef struct {
  */
 int database_init(void);
 
+/** @brief 返回数据库是否已成功打开 */
+bool database_is_ready(void);
+
 /**
  * @brief 插入一条记录
  * @param temp  温度值
@@ -53,6 +56,14 @@ int database_init(void);
  * @return 0成功，非0失败
  */
 int database_insert(float temp, float humi, bool valid);
+
+/**
+ * @brief 在一个事务中批量插入传感器记录
+ * @param records 记录数组
+ * @param count   记录数量
+ * @return 0成功，非0失败；失败时整个批次回滚
+ */
+int database_insert_records(const sensor_record_t *records, int count);
 
 /**
  * @brief 查询过去 N 小时的历史记录

@@ -1,30 +1,30 @@
 /**
  * @file    ota_manager.h
- * @brief   企业级 OTA 远程固件升级管理器
+ * @brief   应用程序 OTA 更新管理器
  *
  * 功能:
  *   - HTTP 远程检查更新 (请求 version.json)
- *   - HTTP 下载固件包 (断点续传 + 进度回调)
+ *   - HTTP 下载应用包 (断点续传 + 进度回调)
  *   - SHA256 完整性校验 (带进度)
- *   - 固件签名验证框架 (可插拔)
- *   - 版本号比较防止降级攻击
+ *   - 可选签名验证回调接口
+ *   - 版本号比较
  *   - 下载超时/重试机制 (3次)
  *   - 备份+自动回滚机制
- *   - 差分补丁 (bspatch)
+ *   - 可选差分补丁 (bspatch)
  *   - LVGL 进度条 + Web API 状态上报
  *
  * 安全设计:
- *   - SHA256 校验确保固件完整性
- *   - 可插拔签名验证 (RSA/ED25519/HMAC)
+ *   - SHA256 校验确保下载文件完整性
+ *   - 可插拔签名验证回调
  *   - 备份+回滚防止变砖
  *   - 版本号字符串比较防止降级
- *   - 固件大小限制 (默认 16MB)
+ *   - 下载应用文件大小限制 (默认 16MB)
  *   - 下载超时 + 3次重试
  *   - 断点续传减少流量浪费
  *
  * OTA 协议 (服务器端需提供):
- *   {base_url}/version.json  — 固件版本元数据
- *   {base_url}/{filename}    — 固件文件 (支持 Range 头)
+ *   {base_url}/version.json  — 应用版本元数据
+ *   {base_url}/{filename}    — 应用文件 (支持 Range 头)
  */
 
 #ifndef OTA_MANAGER_H
@@ -42,8 +42,7 @@ extern "C" {
 
 /** OTA 更新类型 */
 typedef enum {
-    OTA_TYPE_APP,           /**< 应用程序 (kill + 替换 + 重启) */
-    OTA_TYPE_FIRMWARE,      /**< 完整固件镜像 (整机 reboot, 需要额外实现) */
+    OTA_TYPE_APP,           /**< 应用程序原子替换 + 健康检查回滚 */
 } ota_type_t;
 
 /** OTA 状态 */
@@ -64,7 +63,7 @@ typedef enum {
     OTA_ERR_NETWORK,            /**< 网络错误 */
     OTA_ERR_SERVER,             /**< 服务器错误 (HTTP 非200) */
     OTA_ERR_VERIFY,             /**< SHA256/签名 校验失败 */
-    OTA_ERR_SIZE,               /**< 固件大小超限 */
+    OTA_ERR_SIZE,               /**< 应用文件大小超限 */
     OTA_ERR_VERSION,            /**< 版本号非法 (降级攻击) */
     OTA_ERR_WRITE,              /**< 写入文件失败 */
     OTA_ERR_TIMEOUT,            /**< 下载超时 */
@@ -78,12 +77,12 @@ typedef enum {
 /** 版本信息 (从 version.json 解析) */
 typedef struct {
     char    version[32];        /**< 版本号, 如 "2.1.0" */
-    char    update_type[16];    /**< 更新类型: "app" 或 "firmware" */
+    char    update_type[16];    /**< 更新类型: "app" */
     char    build_date[16];     /**< 构建日期 "2026-07-03" */
-    char    filename[128];      /**< 全量固件/应用 文件名 */
+    char    filename[128];      /**< 全量应用文件名 */
     char    sha256[65];         /**< 全量文件 SHA256 校验和 (hex) */
     char    changelog[512];     /**< 更新日志 */
-    char    signature[512];     /**< 固件签名 (hex, 可选) */
+    char    signature[512];     /**< 应用签名 (hex, 可选) */
     int64_t size;               /**< 全量文件大小 (字节) */
     bool    force_update;       /**< 是否强制更新 */
 
@@ -99,15 +98,15 @@ typedef struct {
 typedef void (*ota_progress_cb)(int percent, const char *msg);
 
 /**
- * @brief 固件签名验证回调
- * @param firmware_path  下载的固件文件路径
+ * @brief 应用签名验证回调
+ * @param app_path       下载的应用文件路径
  * @param signature_hex  期望的签名 (hex 字符串, 来自 version.json)
  * @return true=签名有效, false=签名无效
  *
  * 如果不设置此回调, 则跳过签名验证 (仅 SHA256)。
  * 实现示例: 读取公钥 → 验证 ECDSA/RSA 签名。
  */
-typedef bool (*ota_signature_verify_cb)(const char *firmware_path,
+typedef bool (*ota_signature_verify_cb)(const char *app_path,
                                         const char *signature_hex);
 
 /* ==================== API ==================== */
@@ -119,7 +118,7 @@ typedef bool (*ota_signature_verify_cb)(const char *firmware_path,
 void ota_init(const char *ota_server_url);
 
 /**
- * @brief 设置 OTA 更新类型 (固件 or 应用程序)
+ * @brief 设置 OTA 更新类型（当前仅支持应用程序）
  */
 void ota_set_type(ota_type_t type);
 
@@ -149,8 +148,8 @@ void ota_set_signature_verify_callback(ota_signature_verify_cb cb);
 /**
  * @brief 写入健康标志文件 (应用启动后调用, 表示正常运行)
  *
- * OTA 应用更新后, 后台脚本会检查此文件是否存在。
- * 如果新版本启动后 5 秒内未写入, 脚本自动回滚到 .bak 备份。
+ * OTA 应用更新后, 更新 worker 会检查此文件是否存在。
+ * 如果新版本在更新 worker 的宽限期内未写入, worker 自动回滚到 .bak 备份。
  */
 void ota_write_health_marker(void);
 
@@ -162,8 +161,8 @@ void ota_write_health_marker(void);
 bool ota_check_update(ota_version_info_t *info);
 
 /**
- * @brief 开始下载并应用固件更新 (阻塞调用)
- * @return true=升级成功并准备重启, false=失败
+ * @brief 开始下载并应用应用程序更新 (阻塞调用)
+ * @return true=已启动应用替换流程（旧进程随后退出）, false=失败
  */
 bool ota_download_and_apply(void);
 

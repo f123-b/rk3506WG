@@ -7,12 +7,16 @@
 #include "../web_server.h"
 #include "../ntp_sync.h"
 #include "../ota_manager.h"
+#include "../database.h"
+#include "../services/mqtt_client.h"
 #include "../app_config.h"
 #include "../infra/logger.h"
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
 #include <sys/statvfs.h>
+
+extern long app_get_uptime_seconds(void);
 
 /* 外部: web_server.c 提供的 HTTP 响应发送函数 */
 extern void web_send_response(int client_fd, int status,
@@ -70,7 +74,7 @@ void api_system_handle_info(int client_fd)
         ntp_time_str,
         ota_status_str,
         ota_get_progress(),
-        (long)time(NULL));
+         app_get_uptime_seconds());
 
     web_send_response(client_fd, 200, "application/json", json, len);
 }
@@ -94,11 +98,8 @@ void api_system_handle_health(int client_fd)
         else disk_status = "critical";
     }
 
-    /* 简单内存检查 (通过读取 /proc/meminfo 更准确, 这里采样) */
-    const char *memory_status = "ok";  /* 简化: 实际应检查 /proc/meminfo */
-
-    /* 数据库状态 */
-    const char *db_status = "ok";  /* database_init 成功即 OK */
+    const char *db_status = database_is_ready() ? "ok" : "unavailable";
+    const char *mqtt_status = mqtt_client_is_connected() ? "connected" : "disconnected";
 
     /* 构建 JSON 响应 */
     char json[512];
@@ -111,19 +112,17 @@ void api_system_handle_health(int client_fd)
         "\"database\":\"%s\","
         "\"disk\":\"%s\","
         "\"disk_free_pct\":%.1f,"
-        "\"memory\":\"%s\","
         "\"uptime\":%ld,"
         "\"version\":\"%s\""
         "}",
         (ntp_ok) ? "healthy" : "degraded",
-        "check",  /* MQTT 状态需从 mqtt_client 获取, 简化为 check */
+         mqtt_status,
         ntp_ok ? "synced" : "unsynced",
         (long)ntp_last,
         db_status,
         disk_status,
         disk_free_pct,
-        memory_status,
-        (long)time(NULL),
+         app_get_uptime_seconds(),
         APP_VERSION);
 
     web_send_response(client_fd, 200, "application/json", json, len);

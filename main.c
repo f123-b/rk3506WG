@@ -1,23 +1,30 @@
 /**
  * @file    main.c
- * @brief   环境监测站入口 — 自定义标签栏三页切换架构
+ * @brief   环境监测站入口 — 自定义标签栏四页切换架构
  *
  * 不使用 lv_tabview (兼容性问题), 改用:
- *   - 顶部自定义标签栏 (3个按钮, 点击切换)
- *   - 3个独立页面容器 (同一时刻只显示一个, 通过 LV_OBJ_FLAG_HIDDEN 控制)
+ *   - 顶部自定义标签栏 (4个按钮, 点击切换)
+ *   - 4个独立页面容器 (同一时刻只显示一个, 通过 LV_OBJ_FLAG_HIDDEN 控制)
  *   - 屏幕级滑动手势检测 (左右滑动切换)
  *
  * 页面:
  *   Tab 0: MQTT 传感器 (温湿度卡片 + 曲线图)
- *   Tab 1: Modbus/RS485 (设备状态 + 测试发送)
- *   Tab 2: CAN 总线 (收发面板 + 测试发送)
+ *   Tab 1: Modbus/RS485 (设备状态；可选测试发送)
+ *   Tab 2: CAN 总线 (收发面板)
+ *   Tab 3: OTA 更新
  */
+
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 
 #include <lvgl.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <time.h>  /* tzset */
+#include <pthread.h>
+#include <signal.h>
 
 #include "app_config.h"
 #include "infra/logger.h"
@@ -72,10 +79,23 @@ static float g_latest_temp = 0.0f;
 static float g_latest_humi = 0.0f;
 static bool  g_latest_valid = false;
 static bool  g_new_data = false;
+static pthread_mutex_t sensor_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* 测试/运行计数器 */
 int can_tx_cnt = 0, can_rx_cnt = 0;  /* extern: web/api_status.c */
 int rs485_tx_cnt = 0;                /* extern: web/api_status.c */
+static pthread_mutex_t counter_mutex = PTHREAD_MUTEX_INITIALIZER;
+static volatile sig_atomic_t app_running = 1;
+static bool services_initialized = false;
+static time_t app_start_time = 0;
+
+static can_frame_t pending_can_frame;
+static bool pending_can_frame_valid = false;
+static char pending_can_signal_name[32];
+static char pending_can_signal_unit[16];
+static double pending_can_signal_value = 0.0;
+static bool pending_can_signal_valid = false;
+static pthread_mutex_t can_ui_mutex = PTHREAD_MUTEX_INITIALIZER;
 #if CAN_TEST_SEND_ENABLE
 static bool can_tx_ok = false;
 #endif
@@ -94,6 +114,36 @@ static int ip_update_tick = 0;  /* IP 更新节流 */
 
 static int  idle_seconds = 0;
 static bool idle_dimmed  = false;
+
+static void app_signal_handler(int signum)
+{
+    (void)signum;
+    app_running = 0;
+}
+
+void app_get_can_counters(int *tx_count, int *rx_count)
+{
+    pthread_mutex_lock(&counter_mutex);
+    if (tx_count) *tx_count = can_tx_cnt;
+    if (rx_count) *rx_count = can_rx_cnt;
+    pthread_mutex_unlock(&counter_mutex);
+}
+
+int app_get_rs485_tx_count(void)
+{
+    int count;
+    pthread_mutex_lock(&counter_mutex);
+    count = rs485_tx_cnt;
+    pthread_mutex_unlock(&counter_mutex);
+    return count;
+}
+
+long app_get_uptime_seconds(void)
+{
+    time_t now = time(NULL);
+    return app_start_time > 0 && now >= app_start_time
+         ? (long)(now - app_start_time) : 0;
+}
 
 static void backlight_set(int val)
 {
@@ -230,10 +280,12 @@ static void create_tab_bar(lv_obj_t *parent)
 /* ==================== MQTT 回调 ==================== */
 static void on_sensor_data(float temp, float humi, bool valid)
 {
+    pthread_mutex_lock(&sensor_mutex);
     g_latest_temp = temp;
     g_latest_humi = humi;
     g_latest_valid = valid;
     g_new_data = true;
+    pthread_mutex_unlock(&sensor_mutex);
     web_server_update_data(temp, humi, valid);
     data_recorder_record(temp, humi, valid);
 
@@ -248,15 +300,24 @@ static void btn_rs485_send_cb(lv_event_t *e)
 {
     (void)e;
     char buf[80];
+    int tx_count;
+    pthread_mutex_lock(&counter_mutex);
+    tx_count = rs485_tx_cnt;
+    pthread_mutex_unlock(&counter_mutex);
     int len = snprintf(buf, sizeof(buf),
                        "RS485 TEST [#%d] RK3506 UART3 -> RS485 Transceiver\r\n",
-                       rs485_tx_cnt);
+                       tx_count);
     if (rs485_write((const uint8_t *)buf, (size_t)len) >= 0) {
+        pthread_mutex_lock(&counter_mutex);
         rs485_tx_ok = true;
         rs485_tx_cnt++;
-        LOG_INFO("RS485 manual send OK (cnt=%d)", rs485_tx_cnt);
+        tx_count = rs485_tx_cnt;
+        pthread_mutex_unlock(&counter_mutex);
+        LOG_INFO("RS485 manual send OK (cnt=%d)", tx_count);
     } else {
+        pthread_mutex_lock(&counter_mutex);
         rs485_tx_ok = false;
+        pthread_mutex_unlock(&counter_mutex);
         LOG_WARN("RS485 manual send FAILED");
     }
 }
@@ -271,20 +332,29 @@ static void btn_can_send_cb(lv_event_t *e)
     memset(&frame, 0, sizeof(frame));
     frame.can_id = CAN_TEST_ID;
     frame.can_dlc = 8;
-    frame.data[0] = (can_tx_cnt >> 0) & 0xFF;
-    frame.data[1] = (can_tx_cnt >> 8) & 0xFF;
-    frame.data[2] = (can_tx_cnt >> 16) & 0xFF;
-    frame.data[3] = (can_tx_cnt >> 24) & 0xFF;
+    int tx_count;
+    pthread_mutex_lock(&counter_mutex);
+    tx_count = can_tx_cnt;
+    pthread_mutex_unlock(&counter_mutex);
+    frame.data[0] = (tx_count >> 0) & 0xFF;
+    frame.data[1] = (tx_count >> 8) & 0xFF;
+    frame.data[2] = (tx_count >> 16) & 0xFF;
+    frame.data[3] = (tx_count >> 24) & 0xFF;
     frame.data[4] = 0xAA; frame.data[5] = 0xBB;
     frame.data[6] = 0xCC; frame.data[7] = 0xDD;
 
     if (can_write_frame(&frame) == 0) {
+        pthread_mutex_lock(&counter_mutex);
         can_tx_ok = true;
         can_tx_cnt++;
+        int tx_count = can_tx_cnt;
+        pthread_mutex_unlock(&counter_mutex);
         ui_page_can_update_tx_frame(frame.can_id, frame.can_dlc, frame.data);
-        LOG_INFO("CAN manual send OK (cnt=%d)", can_tx_cnt);
+        LOG_INFO("CAN manual send OK (cnt=%d)", tx_count);
     } else {
+        pthread_mutex_lock(&counter_mutex);
         can_tx_ok = false;
+        pthread_mutex_unlock(&counter_mutex);
         LOG_WARN("CAN manual send FAILED");
     }
 }
@@ -302,8 +372,14 @@ static void btn_mqtt_pub_cb(lv_event_t *e)
 {
     (void)e;
     char payload[64];
+    float temp;
+    float humi;
+    pthread_mutex_lock(&sensor_mutex);
+    temp = g_latest_temp;
+    humi = g_latest_humi;
+    pthread_mutex_unlock(&sensor_mutex);
     snprintf(payload, sizeof(payload),
-             "{\"temp\":%.1f,\"humi\":%.0f}", g_latest_temp, g_latest_humi);
+             "{\"temp\":%.1f,\"humi\":%.0f}", temp, humi);
     mqtt_client_publish(MQTT_TOPIC, payload, 1, false);
     LOG_INFO("MQTT publish: %s", payload);
 }
@@ -312,7 +388,9 @@ static void btn_mqtt_refresh_cb(lv_event_t *e)
 {
     (void)e;
     /* 重新填充图表数据 */
+    pthread_mutex_lock(&sensor_mutex);
     g_new_data = true;
+    pthread_mutex_unlock(&sensor_mutex);
     LOG_INFO("Chart refresh requested");
 }
 
@@ -326,36 +404,7 @@ static void btn_mqtt_clear_cb(lv_event_t *e)
     LOG_INFO("Chart data cleared");
 }
 
-/* ==================== Modbus 新按钮回调 ==================== */
-#if RS485_TEST_SEND_ENABLE
-static void btn_modbus_scan_cb(lv_event_t *e)
-{
-    (void)e;
-    LOG_INFO("Modbus scan slaves triggered (1-247)");
-    /* TODO: 实际扫描逻辑 */
-}
-
-static void btn_modbus_read_cb(lv_event_t *e)
-{
-    (void)e;
-    LOG_INFO("Manual register read triggered");
-    /* 模拟读取寄存器 */
-    uint16_t sim_regs[2];
-    sim_regs[0] = (uint16_t)(g_latest_temp * 10.0f);
-    sim_regs[1] = (uint16_t)(g_latest_humi * 10.0f);
-    ui_page_modbus_update_slave(1, "Temp/Humi Sensor", 2, sim_regs, g_latest_valid);
-}
-
-static void btn_modbus_auto_cb(lv_event_t *e)
-{
-    (void)e;
-    ui_page_modbus_toggle_auto();
-    LOG_INFO("Auto polling toggled: %d", ui_page_modbus_get_auto_state());
-}
-#endif
-
-/* ==================== CAN 新按钮回调 ==================== */
-#if CAN_TEST_SEND_ENABLE
+/* ==================== CAN 按钮回调 ==================== */
 static void btn_can_listen_cb(lv_event_t *e)
 {
     (void)e;
@@ -363,19 +412,15 @@ static void btn_can_listen_cb(lv_event_t *e)
     LOG_INFO("CAN listen toggled: %d", ui_page_can_get_listen_state());
 }
 
-static void btn_can_filter_cb(lv_event_t *e)
-{
-    (void)e;
-    LOG_INFO("CAN filter settings (placeholder)");
-    /* TODO: 弹出滤波器设置对话框 */
-}
-
+#if CAN_TEST_SEND_ENABLE
 static void btn_can_clear_cb(lv_event_t *e)
 {
     (void)e;
+    pthread_mutex_lock(&counter_mutex);
     can_tx_cnt = 0;
     can_rx_cnt = 0;
     can_tx_ok = false;
+    pthread_mutex_unlock(&counter_mutex);
     LOG_INFO("CAN counters cleared");
 }
 #endif /* CAN_TEST_SEND_ENABLE */
@@ -383,17 +428,35 @@ static void btn_can_clear_cb(lv_event_t *e)
 /* CAN 数据接收回调 (从 can_manager 接收线程调用 — 解析后的信号值) */
 static void can_recv_cb(uint32_t can_id, const char *name, double value, const char *unit)
 {
-    (void)name; (void)value; (void)unit;
+    int rx_count;
+    pthread_mutex_lock(&counter_mutex);
     can_rx_cnt++;
-    LOG_DEBUG("CAN RX: ID=0x%X %s=%.2f %s (total rx=%d)", can_id, name, value, unit, can_rx_cnt);
+    rx_count = can_rx_cnt;
+    pthread_mutex_unlock(&counter_mutex);
+    pthread_mutex_lock(&can_ui_mutex);
+    snprintf(pending_can_signal_name, sizeof(pending_can_signal_name), "%s",
+             name ? name : "CAN signal");
+    snprintf(pending_can_signal_unit, sizeof(pending_can_signal_unit), "%s",
+             unit ? unit : "");
+    pending_can_signal_value = value;
+    pending_can_signal_valid = true;
+    pthread_mutex_unlock(&can_ui_mutex);
+    LOG_DEBUG("CAN RX: ID=0x%X %s=%.2f %s (total rx=%d)",
+              can_id, name ? name : "CAN signal", value,
+              unit ? unit : "", rx_count);
 }
 
 /* CAN 原始帧接收回调 (每次收到完整帧时调用) */
 static void can_recv_raw_cb(uint32_t can_id, uint8_t dlc, const uint8_t *data)
 {
-    if (ui_page_can_get_listen_state()) {
-        ui_page_can_update_rx_frame(can_id, dlc, data);
-    }
+    if (!data) return;
+    pthread_mutex_lock(&can_ui_mutex);
+    pending_can_frame.can_id = can_id;
+    pending_can_frame.can_dlc = dlc > sizeof(pending_can_frame.data)
+                               ? sizeof(pending_can_frame.data) : dlc;
+    memcpy(pending_can_frame.data, data, pending_can_frame.can_dlc);
+    pending_can_frame_valid = true;
+    pthread_mutex_unlock(&can_ui_mutex);
 }
 
 /* OTA 按钮回调 */
@@ -444,6 +507,18 @@ static void touchpad_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 static void timer_1s_cb(lv_timer_t *timer)
 {
     (void)timer;
+    float latest_temp;
+    float latest_humi;
+    bool latest_valid;
+    bool new_data;
+
+    pthread_mutex_lock(&sensor_mutex);
+    latest_temp = g_latest_temp;
+    latest_humi = g_latest_humi;
+    latest_valid = g_latest_valid;
+    new_data = g_new_data;
+    g_new_data = false;
+    pthread_mutex_unlock(&sensor_mutex);
 
     /* = 防烧屏: 空闲背光控制 = */
     idle_seconds++;
@@ -466,11 +541,10 @@ static void timer_1s_cb(lv_timer_t *timer)
     }
 
     /* 传感器数据 */
-    if (g_new_data) {
-        g_new_data = false;
-        ui_page_mqtt_update_temp(g_latest_temp);
-        ui_page_mqtt_update_humi(g_latest_humi);
-        ui_page_mqtt_add_chart_point(g_latest_temp, g_latest_humi, g_latest_valid);
+    if (new_data) {
+        ui_page_mqtt_update_temp(latest_temp);
+        ui_page_mqtt_update_humi(latest_humi);
+        ui_page_mqtt_add_chart_point(latest_temp, latest_humi, latest_valid);
     }
 
     /* MQTT 状态 */
@@ -479,25 +553,52 @@ static void timer_1s_cb(lv_timer_t *timer)
 
     /* Modbus 页面刷新 */
 #if RS485_TEST_SEND_ENABLE
-    ui_page_modbus_update_tx(rs485_tx_cnt, rs485_tx_ok);
-    ui_page_modbus_update_rx(rs485_tx_cnt > 0 ? rs485_tx_cnt / 2 : 0, rs485_tx_ok);
-    ui_page_modbus_set_led(rs485_tx_ok);
-    /* 模拟从站数据刷新 (从 MQTT 传感器数据派生) */
-    if (g_latest_valid) {
-        uint16_t sim_regs[2];
-        sim_regs[0] = (uint16_t)(g_latest_temp * 10.0f);
-        sim_regs[1] = (uint16_t)(g_latest_humi * 10.0f);
-        ui_page_modbus_update_slave(1, "Temp/Humi Sensor", 2, sim_regs, true);
-    }
+    pthread_mutex_lock(&counter_mutex);
+    int rs485_count = rs485_tx_cnt;
+    bool rs485_ok = rs485_tx_ok;
+    pthread_mutex_unlock(&counter_mutex);
+    ui_page_modbus_update_tx(rs485_count, rs485_ok);
+    ui_page_modbus_update_rx(rs485_count > 0 ? rs485_count / 2 : 0, rs485_ok);
+    ui_page_modbus_set_led(rs485_ok);
 #endif
+
+    can_frame_t frame;
+    bool has_frame;
+    char signal_name[sizeof(pending_can_signal_name)];
+    char signal_unit[sizeof(pending_can_signal_unit)];
+    double signal_value;
+    bool has_signal;
+    pthread_mutex_lock(&can_ui_mutex);
+    has_frame = pending_can_frame_valid;
+    if (has_frame) {
+        memcpy(&frame, &pending_can_frame, sizeof(frame));
+        pending_can_frame_valid = false;
+    }
+    has_signal = pending_can_signal_valid;
+    if (has_signal) {
+        snprintf(signal_name, sizeof(signal_name), "%s", pending_can_signal_name);
+        snprintf(signal_unit, sizeof(signal_unit), "%s", pending_can_signal_unit);
+        signal_value = pending_can_signal_value;
+        pending_can_signal_valid = false;
+    }
+    pthread_mutex_unlock(&can_ui_mutex);
+    if (has_frame && ui_page_can_get_listen_state()) {
+        ui_page_can_update_rx_frame(frame.can_id, frame.can_dlc, frame.data);
+    }
+    if (has_signal) {
+        ui_page_can_update_signal(signal_name, (float)signal_value,
+                                  signal_unit, 0, 8000);
+    }
 
     /* CAN 页面刷新 */
 #if CAN_TEST_SEND_ENABLE
-    ui_page_can_update(CAN_TEST_ID, can_tx_cnt, can_rx_cnt, can_tx_ok);
-    ui_page_can_set_led(can_tx_ok);
-    /* 模拟信号值更新 */
-    ui_page_can_update_signal("Engine RPM",
-        (float)(1500 + (can_tx_cnt % 50) * 100), "rpm", 0, 8000);
+    pthread_mutex_lock(&counter_mutex);
+    int can_tx_count = can_tx_cnt;
+    int can_rx_count = can_rx_cnt;
+    bool can_ok = can_tx_ok;
+    pthread_mutex_unlock(&counter_mutex);
+    ui_page_can_update(CAN_TEST_ID, can_tx_count, can_rx_count, can_ok);
+    ui_page_can_set_led(can_ok);
 #endif
 
     data_recorder_tick();
@@ -510,22 +611,29 @@ static void services_init_timer_cb(lv_timer_t *timer)
     (void)timer;
     LOG_INFO("=== Deferred service init start ===");
 
-    data_recorder_init();
-    web_server_start(HTTP_PORT);
-    LOG_INFO("HTTP server: http://0.0.0.0:%d", HTTP_PORT);
+    if (data_recorder_init() != 0) {
+        LOG_ERROR("Data recorder initialization failed");
+    }
+    if (web_server_start(HTTP_PORT) == 0) {
+        LOG_INFO("HTTP server: http://0.0.0.0:%d", HTTP_PORT);
+    } else {
+        LOG_ERROR("HTTP server failed to start");
+    }
 
-    ntp_sync_init();
+    if (ntp_sync_init() != 0) {
+        LOG_WARN("NTP sync failed to start");
+    }
     ota_init(OTA_DEFAULT_SERVER);
     ota_set_type(OTA_TYPE_APP);
     ota_set_app_install_path(OTA_APP_INSTALL_PATH);
 
+    data_bus_init();
+
     if (mqtt_client_init(MQTT_BROKER, MQTT_PORT, MQTT_TOPIC, on_sensor_data) == 0) {
         mqtt_client_set_auth(MQTT_DEVICE_ID, MQTT_DEVICE_SECRET);
         LOG_INFO("MQTT client initialized");
+        mqtt_client_start();
     }
-    mqtt_client_start();
-
-    data_bus_init();
 
     if (modbus_master_init(MODBUS_DEVICE, MODBUS_BAUD, MODBUS_GPIO_PIN) == 0) {
         modbus_slave_config_t slv;
@@ -552,26 +660,59 @@ static void services_init_timer_cb(lv_timer_t *timer)
         strncpy(sig.signal_name, "Engine RPM", sizeof(sig.signal_name) - 1);
         strncpy(sig.unit, "rpm", sizeof(sig.unit) - 1);
         can_manager_add_signal(&sig);
-        can_manager_start();
         can_manager_set_callback(can_recv_cb);
         can_manager_set_raw_callback(can_recv_raw_cb);
+        can_manager_start();
         LOG_INFO("CAN manager started");
     }
 
+    services_initialized = true;
     LOG_INFO("=== Deferred service init done ===");
     lv_timer_del(timer);  /* 一次性执行 */
+}
+
+static void app_cleanup(void)
+{
+    ota_cancel();
+    if (services_initialized) {
+        can_manager_stop();
+        modbus_master_stop();
+        mqtt_client_stop();
+        ntp_sync_stop();
+        web_server_stop();
+        data_recorder_close();
+        services_initialized = false;
+    }
+
+    watchdog_stop();
+#ifdef HOST_SIMULATION
+    hal_display_deinit();
+#else
+    hal_touch_close();
+    hal_display_deinit();
+#endif
+    logger_close();
 }
 
 /* ==================== 主函数 ==================== */
 int main(void)
 {
+    app_start_time = time(NULL);
     printf("\n============================================\n");
     printf("  RK3506 Environment Monitor v%s\n", APP_VERSION);
-    printf("  3-Page Manual TabBar: MQTT / Modbus / CAN\n");
+    printf("  4-Page Manual TabBar: MQTT / Modbus / CAN / OTA\n");
     printf("============================================\n\n");
 
+#ifdef _WIN32
+    _putenv_s("TZ", "CST-8");
+    _tzset();
+#else
     setenv("TZ", "CST-8", 1);
     tzset();
+#endif
+
+    signal(SIGINT, app_signal_handler);
+    signal(SIGTERM, app_signal_handler);
 
     logger_init(LOG_FILE_PATH);
     LOG_INFO("=== System starting v%s ===", APP_VERSION);
@@ -585,7 +726,11 @@ int main(void)
     hal_display_init();  /* 创建 SDL 窗口 + LVGL display */
     lv_display_t *disp = lv_display_get_default();
 #else
-    if (hal_display_init() < 0) { LOG_ERROR("DRM init failed"); return -1; }
+    if (hal_display_init() < 0) {
+        LOG_ERROR("DRM init failed");
+        app_cleanup();
+        return -1;
+    }
 
     /* LVGL */
     lv_init();
@@ -617,7 +762,7 @@ int main(void)
     /* ========== 创建自定义标签栏 ========== */
     create_tab_bar(scr);
 
-    /* ========== 创建3个页面容器 ========== */
+    /* ========== 创建4个页面容器 ========== */
     /* 页面区域: 标签栏下方, 480 x (800 - TAB_BAR_H) */
     lv_coord_t page_y = TAB_BAR_H;
     lv_coord_t page_h = SCREEN_HEIGHT - TAB_BAR_H;
@@ -666,9 +811,6 @@ int main(void)
     {
         lv_obj_t *b;
         b = ui_page_modbus_get_btn_send(); if (b) lv_obj_add_event_cb(b, btn_rs485_send_cb, LV_EVENT_CLICKED, NULL);
-        b = ui_page_modbus_get_btn_scan(); if (b) lv_obj_add_event_cb(b, btn_modbus_scan_cb, LV_EVENT_CLICKED, NULL);
-        b = ui_page_modbus_get_btn_read(); if (b) lv_obj_add_event_cb(b, btn_modbus_read_cb, LV_EVENT_CLICKED, NULL);
-        b = ui_page_modbus_get_btn_auto(); if (b) lv_obj_add_event_cb(b, btn_modbus_auto_cb, LV_EVENT_CLICKED, NULL);
     }
 #endif
     /* CAN 按钮 */
@@ -676,11 +818,13 @@ int main(void)
     {
         lv_obj_t *b;
         b = ui_page_can_get_btn_send();   if (b) lv_obj_add_event_cb(b, btn_can_send_cb, LV_EVENT_CLICKED, NULL);
-        b = ui_page_can_get_btn_listen(); if (b) lv_obj_add_event_cb(b, btn_can_listen_cb, LV_EVENT_CLICKED, NULL);
-        b = ui_page_can_get_btn_filter(); if (b) lv_obj_add_event_cb(b, btn_can_filter_cb, LV_EVENT_CLICKED, NULL);
         b = ui_page_can_get_btn_clear();  if (b) lv_obj_add_event_cb(b, btn_can_clear_cb, LV_EVENT_CLICKED, NULL);
     }
 #endif
+    {
+        lv_obj_t *b = ui_page_can_get_btn_listen();
+        if (b) lv_obj_add_event_cb(b, btn_can_listen_cb, LV_EVENT_CLICKED, NULL);
+    }
 
     /* OTA 按钮 */
     {
@@ -707,11 +851,13 @@ int main(void)
     LOG_INFO("=== System ready, entering main loop ===");
 
     /* 主循环 */
-    while (1) {
+    while (app_running) {
         lv_tick_inc(1);
         lv_timer_handler();
         usleep(1000);
     }
 
+    LOG_INFO("Shutdown requested");
+    app_cleanup();
     return 0;
 }

@@ -42,10 +42,8 @@
 
 /* ==================== OTA 配置 ==================== */
 #define OTA_DEFAULT_SERVER  "http://192.168.5.128:9090"  /**< OTA 服务器地址 */
-#define OTA_DOWNLOAD_PATH   "/tmp/my_test_new"             /**< 固件/应用下载临时路径 */
+#define OTA_DOWNLOAD_PATH   "/tmp/my_test_new"             /**< 应用包下载临时路径 */
 #define OTA_APP_INSTALL_PATH  "/oem/my_test"               /**< App OTA: 应用安装目标路径 */
-#define OTA_APP_STOP_CMD      "killall my_test"            /**< App OTA: 停止应用命令 */
-#define OTA_APP_START_CMD     "/oem/my_test &"            /**< App OTA: 启动应用命令 */
 
 /* ==================== 日志配置 ==================== */
 #define LOG_FILE_PATH       "/tmp/my_test.log"  /**< 日志文件路径 (NULL=不写文件) */
@@ -61,14 +59,10 @@
 #define CAN_INTERFACE       "can0"        /**< SocketCAN 接口名 */
 #define CAN_BITRATE         500000        /**< 波特率 (常用: 125k/250k/500k/1M) */
 
-/* ==================== 测试模式配置 ==================== */
-#define CAN_TEST_SEND_ENABLE    0       /**< CAN 测试发送: 周期性发送测试帧 (1=开启 0=关闭) */
-#define CAN_TEST_ID             0x123   /**< 测试帧 CAN ID (标准帧 11bit) */
-#define CAN_TEST_INTERVAL_MS    1000    /**< CAN 测试发送间隔 (毫秒) */
-#define CAN_TEST_DATA_BYTES     8       /**< 测试帧数据字节数 (1-8) */
-
-#define RS485_TEST_SEND_ENABLE  0       /**< RS485 测试发送: 周期性发送测试数据 (1=开启 0=关闭) */
-#define RS485_TEST_INTERVAL_MS  2000    /**< RS485 测试发送间隔 (毫秒) */
+/* ==================== 可选测试控件 ==================== */
+#define CAN_TEST_SEND_ENABLE    0       /**< 显示 CAN 测试发送控件 (1=开启 0=关闭) */
+#define CAN_TEST_ID             0x123   /**< CAN 信号示例 ID (标准帧 11bit) */
+#define RS485_TEST_SEND_ENABLE  0       /**< 显示 RS485 测试发送控件 (1=开启 0=关闭) */
 
 /* ==================== 告警阈值 ==================== */
 #define ALARM_TEMP_HIGH     35.0f   /**< 高温告警阈值 (℃) */

@@ -1,0 +1,22 @@
+# Local build output
+/build/
+/build_arm/
+/build_host/
+
+# Runtime data and logs
+*.db
+*.db-journal
+*.log
+*.log.*
+/tmp/
+
+# OTA temporary and backup files
+my_test_new
+my_test.bak
+ota_ok
+
+# Editor and OS metadata
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
