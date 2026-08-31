@@ -12,9 +12,8 @@
  *     0x03 — 读保持寄存器 (Read Holding Registers)   → 读写参数
  *     0x04 — 读输入寄存器 (Read Input Registers)      → 只读传感器值
  *
- *   本模块支持两种模式:
- *     1. libmodbus (推荐): 完整协议栈, 自动 CRC/超时/重试
- *     2. 手动模式 (回退): 手动构造 Modbus RTU 帧, CRC16 查表法
+ *   本模块当前使用手动构造 RTU 帧和 CRC16 校验，没有对外宣称
+ *   libmodbus 适配层。
  *
  * 轮询策略:
  *   多个从站按配置的 poll_interval_ms 循环轮询。

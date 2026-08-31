@@ -4,7 +4,7 @@
  * ① Status bar (36px): RS485 info + LED
  * ② Device card (340px): slave info + register values + bar graphs + poll status
  * ③ Activity bars (80px): TX/RX counts + progress
- * ④ Buttons (94px, bottom y=650): 2x2
+ * ④ Optional test button (only when RS485_TEST_SEND_ENABLE is enabled)
  */
 #include "ui_page_modbus.h"
 #include "../app_config.h"
@@ -30,7 +30,6 @@ static lv_obj_t *g_slave, *g_reg0, *g_reg1, *g_poll;
 static lv_obj_t *g_tx, *g_rx, *g_led;
 static lv_obj_t *g_bar0, *g_bar1, *g_bar_tx, *g_bar_rx;
 static lv_obj_t *g_btn[4];
-static int g_auto = 1;
 
 static lv_style_t st_card, st_bbg, st_bt, st_bh, st_btx, st_brx;
 static lv_style_t st_btn[4];
@@ -201,12 +200,11 @@ lv_obj_t *ui_page_modbus_create(lv_obj_t *parent)
     g_rx = L(act, "0", FB, 0x22d3ee); lv_obj_set_pos(g_rx, 50, rx_y - 4);
     mkbar(act, 110, rx_y + 4, PW - 130, 14, &g_bar_rx, &st_brx);
 
-    /* = ④ Buttons = */
+    /* = ④ Optional test control = */
     int bx = MG;
+#if RS485_TEST_SEND_ENABLE
     g_btn[0] = lv_btn_create(parent); lv_obj_set_size(g_btn[0], BTN_W, BTN_H); lv_obj_set_pos(g_btn[0], bx, BTN_Y); lv_obj_add_style(g_btn[0], &st_btn[0], 0); lv_obj_clear_flag(g_btn[0], LV_OBJ_FLAG_SCROLLABLE); { lv_obj_t *l = L(g_btn[0], "Send Test", FN, 0xffffff); lv_obj_center(l); }
-    g_btn[1] = lv_btn_create(parent); lv_obj_set_size(g_btn[1], BTN_W, BTN_H); lv_obj_set_pos(g_btn[1], bx+BTN_W+GAP, BTN_Y); lv_obj_add_style(g_btn[1], &st_btn[1], 0); lv_obj_clear_flag(g_btn[1], LV_OBJ_FLAG_SCROLLABLE); { lv_obj_t *l = L(g_btn[1], "Scan Bus", FN, 0xffffff); lv_obj_center(l); }
-    g_btn[2] = lv_btn_create(parent); lv_obj_set_size(g_btn[2], BTN_W, BTN_H); lv_obj_set_pos(g_btn[2], bx, BTN_Y+BTN_H+GAP); lv_obj_add_style(g_btn[2], &st_btn[2], 0); lv_obj_clear_flag(g_btn[2], LV_OBJ_FLAG_SCROLLABLE); { lv_obj_t *l = L(g_btn[2], "Read Regs", FN, 0xffffff); lv_obj_center(l); }
-    g_btn[3] = lv_btn_create(parent); lv_obj_set_size(g_btn[3], BTN_W, BTN_H); lv_obj_set_pos(g_btn[3], bx+BTN_W+GAP, BTN_Y+BTN_H+GAP); lv_obj_add_style(g_btn[3], &st_btn[3], 0); lv_obj_clear_flag(g_btn[3], LV_OBJ_FLAG_SCROLLABLE); { lv_obj_t *l = L(g_btn[3], "Auto:ON", FN, 0xffffff); lv_obj_center(l); }
+#endif
 
     LOG_INFO("Modbus page created");
     return parent;
@@ -255,15 +253,4 @@ void ui_page_modbus_set_poll_status(bool p, int iv)
     else { lv_label_set_text(g_poll, "Polling: OFF"); lv_obj_set_style_text_color(g_poll, lv_color_hex(0xef4444), 0); }
 }
 
-void ui_page_modbus_toggle_auto(void) {
-    g_auto = !g_auto;
-    if (g_btn[3]) { lv_obj_t *l = lv_obj_get_child(g_btn[3], 0); if (l) lv_label_set_text(l, g_auto?"Auto:ON":"Auto:OFF"); }
-    ui_page_modbus_set_poll_status(g_auto, MODBUS_POLL_MS);
-}
-
-int  ui_page_modbus_get_auto_state(void)  { return g_auto; }
 lv_obj_t *ui_page_modbus_get_btn_send(void) { return g_btn[0]; }
-lv_obj_t *ui_page_modbus_get_btn_scan(void) { return g_btn[1]; }
-lv_obj_t *ui_page_modbus_get_btn_read(void) { return g_btn[2]; }
-lv_obj_t *ui_page_modbus_get_btn_auto(void) { return g_btn[3]; }
-lv_obj_t *ui_page_modbus_get_test_btn(void)  { return g_btn[0]; }

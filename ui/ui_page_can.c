@@ -5,7 +5,7 @@
  * ② TX/RX stats card: frame counts + progress bars
  * ③ Signal gauge card: signal name + big value + bar
  * ④ Last frame card: latest RX frame data
- * ⑤ Buttons (94px, bottom y=650): 2x2
+ * ⑤ Optional test controls and listen switch
  */
 #include "ui_page_can.h"
 #include "../app_config.h"
@@ -183,12 +183,15 @@ lv_obj_t *ui_page_can_create(lv_obj_t *parent)
     g_frame_rx = L(fc, "RX: ---- (waiting...)", FS, 0x22d3ee);
     lv_obj_align(g_frame_rx, LV_ALIGN_TOP_LEFT, 2, 44);
 
-    /* = ⑤ Buttons = */
+    /* = ⑤ Real controls; test controls are compiled only when enabled = */
     int bx = MG;
+#if CAN_TEST_SEND_ENABLE
     g_btn[0] = lv_btn_create(parent); lv_obj_set_size(g_btn[0], BTN_W, BTN_H); lv_obj_set_pos(g_btn[0], bx, BTN_Y); lv_obj_add_style(g_btn[0], &st_btn[0], 0); lv_obj_clear_flag(g_btn[0], LV_OBJ_FLAG_SCROLLABLE); { lv_obj_t *l = L(g_btn[0], "Send Frame", FN, 0xffffff); lv_obj_center(l); }
+#endif
     g_btn[1] = lv_btn_create(parent); lv_obj_set_size(g_btn[1], BTN_W, BTN_H); lv_obj_set_pos(g_btn[1], bx+BTN_W+GAP, BTN_Y); lv_obj_add_style(g_btn[1], &st_btn[1], 0); lv_obj_clear_flag(g_btn[1], LV_OBJ_FLAG_SCROLLABLE); { lv_obj_t *l = L(g_btn[1], "Listen:ON", FN, 0xffffff); lv_obj_center(l); }
-    g_btn[2] = lv_btn_create(parent); lv_obj_set_size(g_btn[2], BTN_W, BTN_H); lv_obj_set_pos(g_btn[2], bx, BTN_Y+BTN_H+GAP); lv_obj_add_style(g_btn[2], &st_btn[2], 0); lv_obj_clear_flag(g_btn[2], LV_OBJ_FLAG_SCROLLABLE); { lv_obj_t *l = L(g_btn[2], "Set Filter", FN, 0xffffff); lv_obj_center(l); }
+#if CAN_TEST_SEND_ENABLE
     g_btn[3] = lv_btn_create(parent); lv_obj_set_size(g_btn[3], BTN_W, BTN_H); lv_obj_set_pos(g_btn[3], bx+BTN_W+GAP, BTN_Y+BTN_H+GAP); lv_obj_add_style(g_btn[3], &st_btn[3], 0); lv_obj_clear_flag(g_btn[3], LV_OBJ_FLAG_SCROLLABLE); { lv_obj_t *l = L(g_btn[3], "Clear Cnt", FN, 0xffffff); lv_obj_center(l); }
+#endif
 
     LOG_INFO("CAN page created");
     return parent;
@@ -247,6 +250,5 @@ void ui_page_can_toggle_listen(void) {
 int  ui_page_can_get_listen_state(void)     { return g_listen; }
 lv_obj_t *ui_page_can_get_btn_send(void)   { return g_btn[0]; }
 lv_obj_t *ui_page_can_get_btn_listen(void) { return g_btn[1]; }
-lv_obj_t *ui_page_can_get_btn_filter(void) { return g_btn[2]; }
 lv_obj_t *ui_page_can_get_btn_clear(void)  { return g_btn[3]; }
 lv_obj_t *ui_page_can_get_test_btn(void)   { return g_btn[0]; }

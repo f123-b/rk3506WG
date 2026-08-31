@@ -14,7 +14,6 @@
  *     - ntp:      synced / unsynced
  *     - database: ok / error
  *     - disk:     ok (可用空间>10%) / warning / critical
- *     - memory:   ok (可用>10%) / warning / critical
  *     - uptime:   运行秒数
  */
 

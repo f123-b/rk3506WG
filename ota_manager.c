@@ -1,15 +1,15 @@
 /**
  * @file    ota_manager.c
- * @brief   企业级 OTA 远程升级管理器 — 全功能增强版
+ * @brief   应用程序 OTA 远程升级管理器
  *
  * 新增特性 (v3.1):
  *   - 断点续传 (HTTP Range)
  *   - 备份+自动回滚 (健康标志文件)
  *   - SHA256 进度回调
- *   - 固件签名验证框架
+ *   - 应用签名验证回调框架
  *   - 线程安全 (并发锁 + 进度锁)
  *   - 鲁棒 JSON 解析
- *   - 安装脚本错误上报
+ *   - 独立更新 worker 错误处理
  */
 
 #include "ota_manager.h"
@@ -29,37 +29,29 @@
 #include <pthread.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <sys/reboot.h>
+#include <signal.h>
 
 /* ==================== 配置常量 ==================== */
 #define OTA_DEFAULT_SERVER       "http://192.168.5.10:9090"
 #define OTA_DOWNLOAD_PATH        "/tmp/my_test_new"
-#define OTA_MAX_FIRMWARE_SIZE    (16 * 1024 * 1024)  /**< 最大固件 16MB */
+#define OTA_MAX_APP_SIZE         (16 * 1024 * 1024)  /**< 最大应用包 16MB */
 #define OTA_HTTP_TIMEOUT         30                   /**< HTTP 超时 (秒) */
 #define OTA_DOWNLOAD_TIMEOUT     300                  /**< 下载超时 (秒) */
 #define OTA_MAX_RETRIES          3                    /**< 最大重试次数 */
 #define OTA_RECV_BUF_SIZE        8192                 /**< 接收缓冲区 */
 #define OTA_PATCH_PATH           "/tmp/ota_patch"      /**< 差分补丁临时路径 */
-#define OTA_PATCHED_PATH         "/tmp/my_test_new"    /**< bspatch 输出 */
+#define OTA_PATCHED_PATH         "/tmp/my_test_new"    /**< 差分补丁输出 */
 #define OTA_BSPATCH_BIN          "/oem/bspatch"        /**< bspatch 工具路径 */
 #define OTA_HEALTH_FILE          "/tmp/ota_ok"          /**< 健康标志 */
 #define OTA_ROLLBACK_GRACE_SEC   15                     /**< 回滚宽限期 (秒) */
-
-/* 应用版本号 */
-#ifndef APP_VERSION
-#define APP_VERSION  "3.0.0"
-#endif
 
 /* App 模式默认配置 */
 #ifndef OTA_APP_INSTALL_PATH
 #define OTA_APP_INSTALL_PATH  "/oem/my_test"
 #endif
-#ifndef OTA_APP_STOP_CMD
-#define OTA_APP_STOP_CMD      "killall my_test"
-#endif
-#ifndef OTA_APP_START_CMD
-#define OTA_APP_START_CMD     "/oem/my_test &"
-#endif
-
 /* ==================== 内部状态 ==================== */
 static char  ota_server_url[256] = OTA_DEFAULT_SERVER;
 static ota_version_info_t ota_remote_info;
@@ -75,8 +67,6 @@ static bool         ota_cancelled = false;
 /* App OTA 配置 */
 static ota_type_t   ota_type = OTA_TYPE_APP;
 static char         ota_app_install_path[128] = OTA_APP_INSTALL_PATH;
-static char         ota_app_stop_cmd[128]    = OTA_APP_STOP_CMD;
-static char         ota_app_start_cmd[256]   = OTA_APP_START_CMD;
 
 static pthread_mutex_t ota_mutex  = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t ota_lock   = PTHREAD_MUTEX_INITIALIZER;  /* 并发守护锁 */
@@ -85,6 +75,10 @@ static pthread_mutex_t ota_lock   = PTHREAD_MUTEX_INITIALIZER;  /* 并发守护�
 
 static void set_error(ota_error_t err, const char *msg)
 {
+    ota_progress_cb progress_cb;
+    char buf[128];
+
+    pthread_mutex_lock(&ota_mutex);
     ota_last_error = err;
     if (msg) {
         strncpy(ota_error_msg, msg, sizeof(ota_error_msg) - 1);
@@ -92,11 +86,36 @@ static void set_error(ota_error_t err, const char *msg)
     } else {
         ota_error_msg[0] = '\0';
     }
-    if (ota_progress_callback) {
-        char buf[128];
-        snprintf(buf, sizeof(buf), "ERR: %s", msg ? msg : "unknown");
-        ota_progress_callback(-1, buf);
+    progress_cb = ota_progress_callback;
+    snprintf(buf, sizeof(buf), "ERR: %s", msg ? msg : "unknown");
+    pthread_mutex_unlock(&ota_mutex);
+
+    if (progress_cb) {
+        progress_cb(-1, buf);
     }
+}
+
+static void ota_set_state(ota_status_t state)
+{
+    pthread_mutex_lock(&ota_mutex);
+    ota_state = state;
+    pthread_mutex_unlock(&ota_mutex);
+}
+
+static bool ota_is_cancelled(void)
+{
+    bool cancelled;
+    pthread_mutex_lock(&ota_mutex);
+    cancelled = ota_cancelled;
+    pthread_mutex_unlock(&ota_mutex);
+    return cancelled;
+}
+
+static void ota_set_progress(int progress)
+{
+    pthread_mutex_lock(&ota_mutex);
+    ota_download_progress = progress;
+    pthread_mutex_unlock(&ota_mutex);
 }
 
 /* ==================== 版本号比较 ==================== */
@@ -436,7 +455,7 @@ static bool file_write_cb(const uint8_t *data, size_t len, void *ctx)
 {
     file_dl_ctx_t *fc = (file_dl_ctx_t *)ctx;
 
-    if (ota_cancelled) return false;
+    if (ota_is_cancelled()) return false;
 
     fc->received += len;
 
@@ -444,10 +463,8 @@ static bool file_write_cb(const uint8_t *data, size_t len, void *ctx)
     if (fc->total > 0) {
         int pct = (int)(fc->received * 100 / fc->total);
         if (pct > 100) pct = 100;
-        if (pct != ota_download_progress) {
-            pthread_mutex_lock(&ota_mutex);
-            ota_download_progress = pct;
-            pthread_mutex_unlock(&ota_mutex);
+        if (pct != ota_get_progress()) {
+            ota_set_progress(pct);
 
             if (ota_progress_callback) {
                 char msg[64];
@@ -501,36 +518,44 @@ void ota_unlock(void)
 
 void ota_init(const char *ota_server)
 {
+    pthread_mutex_lock(&ota_mutex);
     if (ota_server && ota_server[0]) {
         strncpy(ota_server_url, ota_server, sizeof(ota_server_url) - 1);
         ota_server_url[sizeof(ota_server_url) - 1] = '\0';
     }
     ota_state = OTA_IDLE;
     ota_cancelled = false;
+    pthread_mutex_unlock(&ota_mutex);
     printf("OTA: server = %s, local version = %s, type = %s\n",
            ota_server_url, APP_VERSION,
-           (ota_type == OTA_TYPE_APP) ? "app" : "firmware");
+           "app");
 }
 
 void ota_set_type(ota_type_t type)
 {
+    (void)type;
+    pthread_mutex_lock(&ota_mutex);
     ota_type = type;
-    printf("OTA: update type set to %s\n",
-           (type == OTA_TYPE_APP) ? "app" : "firmware");
+    pthread_mutex_unlock(&ota_mutex);
+    printf("OTA: update type set to app\n");
 }
 
 ota_type_t ota_get_type(void)
 {
-    return ota_type;
+    ota_type_t type;
+    pthread_mutex_lock(&ota_mutex);
+    type = ota_type;
+    pthread_mutex_unlock(&ota_mutex);
+    return type;
 }
 
 void ota_set_app_install_path(const char *path)
 {
     if (path && path[0]) {
+        pthread_mutex_lock(&ota_mutex);
         strncpy(ota_app_install_path, path, sizeof(ota_app_install_path) - 1);
         ota_app_install_path[sizeof(ota_app_install_path) - 1] = '\0';
-        snprintf(ota_app_start_cmd, sizeof(ota_app_start_cmd),
-                 "%s &", ota_app_install_path);
+        pthread_mutex_unlock(&ota_mutex);
         printf("OTA: app install path = %s\n", ota_app_install_path);
     }
 }
@@ -551,25 +576,29 @@ void ota_set_signature_verify_callback(ota_signature_verify_cb cb)
  */
 static int ota_apply_delta_patch(void)
 {
-    char cmd[512];
-
     printf("OTA (delta): applying bspatch...\n");
-    snprintf(cmd, sizeof(cmd), "%s %s %s %s 2>>/tmp/ota_error.log",
-             OTA_BSPATCH_BIN,
-             ota_app_install_path,
-             OTA_PATCHED_PATH,
-             OTA_PATCH_PATH);
-
-    pthread_mutex_lock(&ota_mutex);
-    ota_state = OTA_PATCHING;
-    pthread_mutex_unlock(&ota_mutex);
+    ota_set_state(OTA_PATCHING);
 
     if (ota_progress_callback)
         ota_progress_callback(90, "Applying delta patch...");
 
-    int rc = system(cmd);
+    pid_t child = fork();
+    if (child == 0) {
+        execl(OTA_BSPATCH_BIN, OTA_BSPATCH_BIN,
+              ota_app_install_path, OTA_PATCHED_PATH, OTA_PATCH_PATH,
+              (char *)NULL);
+        _exit(127);
+    }
+    int rc = -1;
+    if (child > 0) {
+        int status = 0;
+        if (waitpid(child, &status, 0) == child &&
+            WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+            rc = 0;
+        }
+    }
     if (rc != 0) {
-        printf("OTA (delta): bspatch failed with rc=%d\n", rc);
+        printf("OTA (delta): bspatch failed\n");
         set_error(OTA_ERR_PATCH, "bspatch apply failed");
         unlink(OTA_PATCH_PATH);
         return -1;
@@ -608,125 +637,150 @@ static int ota_apply_delta_patch(void)
 /**
  * @brief 应用 App 更新 (增强版: 备份 + 回滚)
  */
+static int copy_file_sync(const char *src, const char *dst)
+{
+    int in_fd = open(src, O_RDONLY);
+    if (in_fd < 0) return -1;
+
+    int out_fd = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0755);
+    if (out_fd < 0) {
+        close(in_fd);
+        return -1;
+    }
+
+    char buf[8192];
+    int rc = 0;
+    for (;;) {
+        ssize_t n = read(in_fd, buf, sizeof(buf));
+        if (n == 0) break;
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            rc = -1;
+            break;
+        }
+        ssize_t written = 0;
+        while (written < n) {
+            ssize_t w = write(out_fd, buf + written, (size_t)(n - written));
+            if (w < 0 && errno == EINTR) continue;
+            if (w <= 0) {
+                rc = -1;
+                break;
+            }
+            written += w;
+        }
+        if (rc != 0) break;
+    }
+
+    if (rc == 0 && fsync(out_fd) != 0) rc = -1;
+    if (close(out_fd) != 0) rc = -1;
+    close(in_fd);
+    if (rc != 0) unlink(dst);
+    return rc;
+}
+
+static void ota_start_binary(const char *path)
+{
+    execl(path, path, (char *)NULL);
+    _exit(127);
+}
+
+static void sync_parent_directory(const char *path)
+{
+    char dir_path[256];
+    snprintf(dir_path, sizeof(dir_path), "%s", path);
+    char *slash = strrchr(dir_path, '/');
+    if (!slash) {
+        snprintf(dir_path, sizeof(dir_path), ".");
+    } else if (slash == dir_path) {
+        slash[1] = '\0';
+    } else {
+        *slash = '\0';
+    }
+
+    int dir_fd = open(dir_path, O_RDONLY);
+    if (dir_fd >= 0) {
+        fsync(dir_fd);
+        close(dir_fd);
+    }
+}
+
+static void ota_apply_worker(const char *src_path, const char *install_path)
+{
+    char backup_path[256];
+    char temp_path[256];
+    snprintf(backup_path, sizeof(backup_path), "%s.bak", install_path);
+    snprintf(temp_path, sizeof(temp_path), "%s.new", install_path);
+
+    unlink(OTA_HEALTH_FILE);
+    bool had_backup = access(install_path, F_OK) == 0;
+    if (had_backup) {
+        unlink(backup_path);
+        /* 保留旧 inode 的备份，同时让最终 rename(temp, install) 保持原子替换。 */
+        if (link(install_path, backup_path) != 0 &&
+            copy_file_sync(install_path, backup_path) != 0) {
+            _exit(20);
+        }
+    }
+
+    if (copy_file_sync(src_path, temp_path) != 0 ||
+        rename(temp_path, install_path) != 0) {
+        unlink(temp_path);
+        if (had_backup) unlink(backup_path);
+        _exit(21);
+    }
+    sync_parent_directory(install_path);
+    chmod(install_path, 0755);
+    unlink(src_path);
+    sync();
+
+    pid_t app_pid = fork();
+    if (app_pid == 0) ota_start_binary(install_path);
+    if (app_pid < 0) _exit(22);
+
+    sleep(OTA_ROLLBACK_GRACE_SEC);
+    if (access(OTA_HEALTH_FILE, F_OK) == 0) {
+        unlink(OTA_HEALTH_FILE);
+        if (had_backup) unlink(backup_path);
+        _exit(0);
+    }
+
+    kill(app_pid, SIGTERM);
+    waitpid(app_pid, NULL, 0);
+    unlink(install_path);
+    if (had_backup && rename(backup_path, install_path) == 0) {
+        chmod(install_path, 0755);
+        sync_parent_directory(install_path);
+        sync();
+        pid_t rollback_pid = fork();
+        if (rollback_pid == 0) ota_start_binary(install_path);
+    }
+    _exit(23);
+}
+
 int ota_apply_app_update(void)
 {
     char src_path[256];
-    char backup_path[300];
-
+    char install_path[256];
     snprintf(src_path, sizeof(src_path), "%s", OTA_DOWNLOAD_PATH);
-    snprintf(backup_path, sizeof(backup_path), "%s.bak", ota_app_install_path);
+    pthread_mutex_lock(&ota_mutex);
+    snprintf(install_path, sizeof(install_path), "%s", ota_app_install_path);
+    pthread_mutex_unlock(&ota_mutex);
 
-    printf("OTA (app): applying update from %s\n", src_path);
-    printf("OTA (app): install path = %s\n", ota_app_install_path);
-    printf("OTA (app): backup path  = %s\n", backup_path);
-
-    /* 1. 检查下载文件 */
     if (access(src_path, F_OK) != 0) {
         set_error(OTA_ERR_WRITE, "Update file not found");
         return -1;
     }
 
-    if (ota_progress_callback) {
-        ota_progress_callback(97, "Preparing upgrade script...");
-    }
+    if (ota_progress_callback) ota_progress_callback(98, "Applying atomic upgrade...");
 
-    /* ★ 安装脚本 (增强版):
-     *   1. 删除旧健康标志
-     *   2. 备份当前版本到 .bak
-     *   3. 替换二进制
-     *   4. 启动新版本
-     *   5. 在宽限期内检查健康标志
-     *   6. 如果新版本没写健康标志 → 自动回滚
-     */
-    char script[4096];
-    snprintf(script, sizeof(script),
-        "#!/bin/sh\n"
-        "# OTA Apply Script v3.1 - with rollback support\n"
-        "LOG=\"/tmp/ota_error.log\"\n"
-        "echo \"[OTA] $(date): Starting apply...\" >> $LOG\n"
-
-        /* 0. 清理健康标志 (新进程启动后会重写) */
-        "rm -f %s\n"
-
-        /* 1. 备份当前版本 */
-        "if [ -f \"%s\" ]; then\n"
-        "  cp \"%s\" \"%s\" 2>>$LOG || { echo \"[OTA] ERROR: backup failed\" >> $LOG; exit 1; }\n"
-        "  echo \"[OTA] backup created: %s\" >> $LOG\n"
-        "fi\n"
-
-        /* 2. 休眠等旧进程退出 */
-        "sleep 2\n"
-
-        /* 3. 替换二进制 */
-        "cp \"%s\" \"%s\" 2>>$LOG || { echo \"[OTA] ERROR: cp failed\" >> $LOG; exit 1; }\n"
-        "chmod 755 \"%s\" 2>>$LOG || { echo \"[OTA] ERROR: chmod failed\" >> $LOG; exit 1; }\n"
-        "sync\n"
-        "echo \"[OTA] binary replaced: %s\" >> $LOG\n"
-
-        /* 4. 清理临时文件 */
-        "rm -f \"%s\"\n"
-
-        /* 5. 启动新版本 */
-        "echo \"[OTA] starting new version...\" >> $LOG\n"
-        "%s\n"
-
-        /* 6. 等待健康标志 (新进程启动后应写入) */
-        "sleep %d\n"
-        "if [ -f \"%s\" ]; then\n"
-        "  echo \"[OTA] SUCCESS: health marker found, upgrade OK\" >> $LOG\n"
-        "  rm -f \"%s\"\n"   /* 清理备份 (升级成功) */
-        "else\n"
-        "  echo \"[OTA] ROLLBACK: no health marker, restoring backup\" >> $LOG\n"
-        "  cp \"%s\" \"%s\" 2>>$LOG\n"
-        "  chmod 755 \"%s\" 2>>$LOG\n"
-        "  sync\n"
-        "  %s\n"   /* 启动回滚版本 */
-        "  echo \"[OTA] rollback complete\" >> $LOG\n"
-        "fi\n",
-
-        /* 参数列表 (按顺序) */
-        OTA_HEALTH_FILE,                                    /* rm -f */
-        ota_app_install_path,                               /* if [ -f ] */
-        ota_app_install_path, backup_path,                  /* cp → backup */
-        backup_path,                                        /* echo */
-        src_path, ota_app_install_path,                     /* cp new → dest */
-        ota_app_install_path,                               /* chmod */
-        ota_app_install_path,                               /* echo */
-        src_path,                                           /* rm -f */
-        ota_app_start_cmd,                                  /* start new */
-        OTA_ROLLBACK_GRACE_SEC,                             /* sleep N */
-        OTA_HEALTH_FILE,                                    /* if [ -f ] */
-        backup_path,                                        /* rm -f backup (success) */
-        backup_path, ota_app_install_path,                  /* cp backup → dest */
-        ota_app_install_path,                               /* chmod */
-        ota_app_start_cmd                                   /* start rollback */
-    );
-
-    /* 写入临时脚本 */
-    FILE *fp = fopen("/tmp/ota_apply.sh", "w");
-    if (!fp) {
-        set_error(OTA_ERR_WRITE, "Cannot create upgrade script");
+    pid_t worker = fork();
+    if (worker < 0) {
+        set_error(OTA_ERR_WRITE, "Cannot create OTA worker");
         return -1;
     }
-    fputs(script, fp);
-    fclose(fp);
-    chmod("/tmp/ota_apply.sh", 0755);
+    if (worker == 0) ota_apply_worker(src_path, install_path);
 
-    if (ota_progress_callback) {
-        ota_progress_callback(98, "Stopping old process...");
-    }
-
-    /* 启动后台脚本 */
-    printf("OTA (app): launching apply script in background...\n");
-    system("sh /tmp/ota_apply.sh &");
-
-    /* 停止当前进程 */
-    printf("OTA (app): stopping: %s\n", ota_app_stop_cmd);
     sync();
-    system(ota_app_stop_cmd);
-
-    /* 如果还活着 */
-    printf("OTA (app): still alive, forcing exit\n");
     _exit(0);
     return 0;
 }
@@ -738,6 +792,7 @@ bool ota_check_update(ota_version_info_t *info)
     pthread_mutex_lock(&ota_mutex);
     ota_state = OTA_CHECKING;
     ota_last_error = OTA_ERR_NONE;
+    ota_error_msg[0] = '\0';
     ota_cancelled = false;
     pthread_mutex_unlock(&ota_mutex);
 
@@ -755,8 +810,7 @@ bool ota_check_update(ota_version_info_t *info)
 
     if (http_get(url, mem_write_cb, &mb, &http_status, OTA_HTTP_TIMEOUT) != 0 ||
         (http_status != 200 && http_status != 206)) {
-        pthread_mutex_lock(&ota_mutex);
-        ota_state = OTA_FAILED;
+        ota_set_state(OTA_FAILED);
         if (http_status == 404) {
             set_error(OTA_ERR_SERVER, "version.json not found (404)");
         } else if (http_status == 0) {
@@ -766,7 +820,6 @@ bool ota_check_update(ota_version_info_t *info)
             snprintf(msg, sizeof(msg), "Server returned HTTP %d", http_status);
             set_error(OTA_ERR_SERVER, msg);
         }
-        pthread_mutex_unlock(&ota_mutex);
         return false;
     }
 
@@ -799,28 +852,31 @@ bool ota_check_update(ota_version_info_t *info)
            (long long)info->size, info->has_delta);
 
     if (info->signature[0]) {
-        printf("OTA: firmware signature present (%zu chars)\n",
+        printf("OTA: application signature present (%zu chars)\n",
                strlen(info->signature));
     }
 
     /* 根据 version.json 中的 type 自动切换 OTA 模式 */
     if (strcmp(info->update_type, "app") == 0) {
+        pthread_mutex_lock(&ota_mutex);
         ota_type = OTA_TYPE_APP;
+        pthread_mutex_unlock(&ota_mutex);
         printf("OTA: auto-detected app update mode\n");
-    } else if (strcmp(info->update_type, "firmware") == 0) {
-        ota_type = OTA_TYPE_FIRMWARE;
-        printf("OTA: firmware mode detected\n");
+    } else if (info->update_type[0] != '\0') {
+        set_error(OTA_ERR_SERVER, "Unsupported OTA update type");
+        ota_set_state(OTA_FAILED);
+        return false;
     }
 
     /* 保存远程信息 */
+    pthread_mutex_lock(&ota_mutex);
     memcpy(&ota_remote_info, info, sizeof(ota_remote_info));
+    pthread_mutex_unlock(&ota_mutex);
 
     /* 版本比较 */
     if (version_compare(info->version, APP_VERSION) <= 0 && !info->force_update) {
-        pthread_mutex_lock(&ota_mutex);
-        ota_state = OTA_IDLE;
         set_error(OTA_ERR_NO_UPDATE, "Already latest version");
-        pthread_mutex_unlock(&ota_mutex);
+        ota_set_state(OTA_IDLE);
         if (ota_progress_callback) ota_progress_callback(100, "Already latest version");
         return false;
     }
@@ -828,6 +884,7 @@ bool ota_check_update(ota_version_info_t *info)
     pthread_mutex_lock(&ota_mutex);
     ota_state = OTA_IDLE;
     ota_last_error = OTA_ERR_NONE;
+    ota_error_msg[0] = '\0';
     pthread_mutex_unlock(&ota_mutex);
 
     if (ota_progress_callback) ota_progress_callback(100, "New version found!");
@@ -883,9 +940,9 @@ bool ota_download_and_apply(void)
     }
 
     int64_t dl_size = use_delta ? ota_remote_info.delta_size : ota_remote_info.size;
-    if (dl_size > OTA_MAX_FIRMWARE_SIZE) {
+    if (dl_size > OTA_MAX_APP_SIZE) {
         set_error(OTA_ERR_SIZE, "File size exceeds limit");
-        ota_state = OTA_FAILED;
+        ota_set_state(OTA_FAILED);
         return false;
     }
 
@@ -902,7 +959,7 @@ bool ota_download_and_apply(void)
     pthread_mutex_unlock(&ota_mutex);
 
     if (ota_progress_callback)
-        ota_progress_callback(0, use_delta ? "Downloading delta..." : "Downloading firmware...");
+        ota_progress_callback(0, use_delta ? "Downloading delta..." : "Downloading application...");
 
     /* 检查是否已有部分下载 */
     int64_t existing = file_size(dl_path);
@@ -934,7 +991,7 @@ bool ota_download_and_apply(void)
     /* 重试循环 */
     int retry;
     bool download_ok = false;
-    for (retry = 0; retry < OTA_MAX_RETRIES && !download_ok && !ota_cancelled; retry++) {
+    for (retry = 0; retry < OTA_MAX_RETRIES && !download_ok && !ota_is_cancelled(); retry++) {
         if (retry > 0 && ota_progress_callback) {
             char msg[64];
             snprintf(msg, sizeof(msg), "Retry %d/%d...", retry + 1, OTA_MAX_RETRIES);
@@ -948,7 +1005,7 @@ bool ota_download_and_apply(void)
         FILE *fp = fopen(dl_path, (resume_pos > 0) ? "ab" : "wb");
         if (!fp) {
             set_error(OTA_ERR_WRITE, "Cannot create download file");
-            ota_state = OTA_FAILED;
+            ota_set_state(OTA_FAILED);
             return false;
         }
 
@@ -981,15 +1038,13 @@ bool ota_download_and_apply(void)
 
     if (!download_ok) {
         set_error(OTA_ERR_NETWORK, "Download failed (retried 3 times)");
-        ota_state = OTA_FAILED;
+        ota_set_state(OTA_FAILED);
         return false;
     }
 
 verify_stage:
     /* ===== 阶段2: SHA256 校验 (带进度回调) ===== */
-    pthread_mutex_lock(&ota_mutex);
-    ota_state = OTA_VERIFYING;
-    pthread_mutex_unlock(&ota_mutex);
+    ota_set_state(OTA_VERIFYING);
 
     if (ota_progress_callback) ota_progress_callback(95, "Verifying SHA256...");
 
@@ -999,7 +1054,7 @@ verify_stage:
     if (sha256_file_ex(dl_path, actual_sha256,
                        sha256_progress_adapter, &spc) != 0) {
         set_error(OTA_ERR_VERIFY, "SHA256 calculation failed");
-        ota_state = OTA_FAILED;
+        ota_set_state(OTA_FAILED);
         return false;
     }
 
@@ -1012,7 +1067,7 @@ verify_stage:
                  "SHA256 mismatch! expected:%s got:%s",
                  expected_sha256, actual_sha256);
         set_error(OTA_ERR_VERIFY, msg);
-        ota_state = OTA_FAILED;
+        ota_set_state(OTA_FAILED);
         unlink(dl_path);
         return false;
     }
@@ -1024,10 +1079,10 @@ verify_stage:
         if (ota_progress_callback)
             ota_progress_callback(96, "Verifying signature...");
 
-        printf("OTA: verifying firmware signature...\n");
+        printf("OTA: verifying application signature...\n");
         if (!ota_signature_callback(dl_path, ota_remote_info.signature)) {
             set_error(OTA_ERR_SIGNATURE, "Signature verification failed");
-            ota_state = OTA_FAILED;
+            ota_set_state(OTA_FAILED);
             unlink(dl_path);
             return false;
         }
@@ -1037,54 +1092,27 @@ verify_stage:
     /* ===== 阶段2.6: 差分补丁应用 ===== */
     if (use_delta) {
         if (ota_apply_delta_patch() != 0) {
-            ota_state = OTA_FAILED;
+            ota_set_state(OTA_FAILED);
             return false;
         }
         unlink(OTA_DOWNLOAD_PATH);
         if (rename(OTA_PATCHED_PATH, OTA_DOWNLOAD_PATH) != 0) {
             set_error(OTA_ERR_WRITE, "Rename patched file failed");
-            ota_state = OTA_FAILED;
+            ota_set_state(OTA_FAILED);
             return false;
         }
         printf("OTA (delta): patched file ready at %s\n", OTA_DOWNLOAD_PATH);
     }
 
     /* ===== 阶段3: 应用更新 ===== */
-    pthread_mutex_lock(&ota_mutex);
-    ota_state = OTA_APPLYING;
-    pthread_mutex_unlock(&ota_mutex);
+    ota_set_state(OTA_APPLYING);
 
-    if (ota_type == OTA_TYPE_APP) {
-        if (ota_apply_app_update() != 0) {
-            ota_state = OTA_FAILED;
-            return false;
-        }
-        /* 正常不会执行到这 (_exit above) */
-        pthread_mutex_lock(&ota_mutex);
-        ota_state = OTA_SUCCESS;
-        ota_download_progress = 100;
-        pthread_mutex_unlock(&ota_mutex);
-        return true;
+    if (ota_apply_app_update() != 0) {
+        ota_set_state(OTA_FAILED);
+        return false;
     }
-
-    /* Firmware 模式: 下载完成, 等待用户手动触发固件烧写 */
-    if (ota_progress_callback)
-        ota_progress_callback(99, "Firmware downloaded, ready to flash");
-
-    printf("OTA (firmware): image ready at %s\n", OTA_DOWNLOAD_PATH);
-    printf("OTA (firmware): SHA256 verified, manual flash required\n");
-    printf("OTA (firmware): To flash: dd if=%s of=<flash_partition> bs=4M\n",
-           OTA_DOWNLOAD_PATH);
-
-    pthread_mutex_lock(&ota_mutex);
-    ota_state = OTA_SUCCESS;
-    ota_download_progress = 100;
-    pthread_mutex_unlock(&ota_mutex);
-
-    if (ota_progress_callback)
-        ota_progress_callback(100, "Firmware ready, waiting for flash");
-
-    return true;
+    /* ota_apply_app_update exits the old process after starting the worker. */
+    return false;
 }
 
 /* ==================== 状态查询 (线程安全) ==================== */
@@ -1118,7 +1146,12 @@ ota_error_t ota_get_last_error(void)
 
 const char *ota_get_last_error_msg(void)
 {
-    return ota_error_msg;
+    static _Thread_local char message[sizeof(ota_error_msg)];
+    pthread_mutex_lock(&ota_mutex);
+    strncpy(message, ota_error_msg, sizeof(message) - 1);
+    message[sizeof(message) - 1] = '\0';
+    pthread_mutex_unlock(&ota_mutex);
+    return message;
 }
 
 void ota_reboot(void)
@@ -1126,8 +1159,8 @@ void ota_reboot(void)
     printf("OTA: rebooting system...\n");
     sync();
     sleep(1);
-    if (system("reboot") != 0) {
-        system("/sbin/reboot");
+    if (reboot(RB_AUTOBOOT) != 0) {
+        fprintf(stderr, "OTA: reboot failed: %s\n", strerror(errno));
     }
 }
 

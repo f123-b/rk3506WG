@@ -35,7 +35,7 @@ typedef void (*mqtt_data_callback_t)(float temperature, float humidity,
                                      bool valid);
 
 /**
- * @brief 初始化 MQTT 客户端并连接 Broker
+ * @brief 初始化 MQTT 客户端
  * @param broker     MQTT Broker 地址 (如 "192.168.5.10")
  * @param port       Broker 端口 (默认 1883)
  * @param topic      订阅主题 (如 "esp32c6/sensor")
@@ -49,7 +49,7 @@ int mqtt_client_init(const char *broker, int port, const char *topic,
  * @brief 设置设备认证信息 (华为云IoT等平台需要)
  * @param device_id     设备ID (用户名)
  * @param device_secret 设备密钥 (密码, 或用于生成HMAC签名)
- * @note  必须在 mqtt_client_init() 之后、mqtt_client_start() 之前调用
+ * @note  必须在 mqtt_client_start() 之前调用；连接由 start() 发起。
  */
 void mqtt_client_set_auth(const char *device_id, const char *device_secret);
 

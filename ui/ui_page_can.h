@@ -39,7 +39,6 @@ int  ui_page_can_get_listen_state(void);
 /* 按钮获取函数 */
 lv_obj_t * ui_page_can_get_btn_send(void);
 lv_obj_t * ui_page_can_get_btn_listen(void);
-lv_obj_t * ui_page_can_get_btn_filter(void);
 lv_obj_t * ui_page_can_get_btn_clear(void);
 lv_obj_t * ui_page_can_get_test_btn(void);  /* 兼容旧 API */
 

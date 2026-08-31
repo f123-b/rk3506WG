@@ -3,8 +3,7 @@
  * @brief   Modbus RTU 主站实现
  *
  * 支持两种模式:
- *   1. libmodbus (推荐): 完整协议栈, 自动 CRC/超时/重试
- *   2. 手动模式 (回退): 手动构造 Modbus RTU 帧, 适用于无 libmodbus 环境
+ * 当前实现手动构造 Modbus RTU 帧，并自行完成超时和 CRC 校验。
  *
  * 手动模式 CRC16 计算使用查表法 (Modbus CRC-16-IBM, 多项式 0x8005)。
  */
@@ -20,6 +19,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <errno.h>
+#include <stdatomic.h>
 
 /* ==================== 配置 ==================== */
 #define MAX_SLAVES           8     /**< 最大从站数量 */
@@ -31,7 +31,9 @@ static modbus_slave_config_t slaves[MAX_SLAVES];
 static int slave_count = 0;
 static modbus_data_callback_t user_callback = NULL;
 static pthread_t poll_thread;
-static bool running = false;
+static atomic_bool running = false;
+static bool poll_thread_valid = false;
+static pthread_mutex_t state_mutex = PTHREAD_MUTEX_INITIALIZER;
 static char dev_name[64];
 static int dev_baud;
 static int gpio_pin_num;
@@ -118,17 +120,23 @@ static int modbus_read_regs_manual(int slave_id, int func_code,
     }
 
     /* 检查地址和功能码 */
-    if (resp[0] != slave_id || resp[1] != func_code) {
+    if (resp[0] != slave_id) {
         return -1;
     }
 
     /* 检查异常码 */
     if (resp[1] & 0x80) {
+        if (n < 5) return -1;
         LOG_WARN("Modbus: slave %d exception code %d", slave_id, resp[2]);
         return -1;
     }
+    if (resp[1] != func_code) return -1;
 
     int byte_count = resp[2];
+    if (byte_count <= 0 || byte_count > MODBUS_FRAME_MAX - 5 ||
+        byte_count > nb_regs * 2 || 3 + byte_count + 2 > n) {
+        return -1;
+    }
     int reg_count = byte_count / 2;
 
     /* 验证 CRC */
@@ -158,8 +166,8 @@ static void *modbus_poll_thread_func(void *arg)
 
     LOG_INFO("Modbus: poll thread started, %d slaves", slave_count);
 
-    while (running) {
-        for (int i = 0; i < slave_count && running; i++) {
+    while (atomic_load(&running)) {
+        for (int i = 0; i < slave_count && atomic_load(&running); i++) {
             modbus_slave_config_t *slv = &slaves[i];
 
             int nb = modbus_read_regs_manual(
@@ -211,7 +219,7 @@ static void *modbus_poll_thread_func(void *arg)
             /* 轮询间隔 */
             int interval = slv->poll_interval_ms;
             if (interval < 100) interval = 100;
-            for (int t = 0; t < interval / 100 && running; t++) {
+            for (int t = 0; t < interval / 100 && atomic_load(&running); t++) {
                 usleep(100000);  /* 100ms 分片, 便于及时退出 */
             }
         }
@@ -267,21 +275,35 @@ int modbus_master_start(void)
         return 0;
     }
 
-    running = true;
+    pthread_mutex_lock(&state_mutex);
+    if (poll_thread_valid) {
+        pthread_mutex_unlock(&state_mutex);
+        return 0;
+    }
+    atomic_store(&running, true);
+    pthread_mutex_unlock(&state_mutex);
     if (pthread_create(&poll_thread, NULL, modbus_poll_thread_func, NULL) != 0) {
         LOG_ERROR("Modbus: thread create failed");
-        running = false;
+        atomic_store(&running, false);
         return -1;
     }
+    pthread_mutex_lock(&state_mutex);
+    poll_thread_valid = true;
+    pthread_mutex_unlock(&state_mutex);
 
     return 0;
 }
 
 void modbus_master_stop(void)
 {
-    running = false;
-    if (poll_thread) {
-        pthread_join(poll_thread, NULL);
+    atomic_store(&running, false);
+    pthread_mutex_lock(&state_mutex);
+    bool join_thread = poll_thread_valid;
+    pthread_t thread = poll_thread;
+    poll_thread_valid = false;
+    pthread_mutex_unlock(&state_mutex);
+    if (join_thread) {
+        pthread_join(thread, NULL);
     }
     rs485_close();
     LOG_INFO("Modbus master stopped");

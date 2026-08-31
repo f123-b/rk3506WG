@@ -123,7 +123,7 @@
 </div>
 
 <div class="footer">
-  RK3506 IoT EVM &nbsp;|&nbsp; <span id="sys-ver">v3.0.0</span> &nbsp;|&nbsp; 刷新: 1s
+  RK3506 IoT EVM &nbsp;|&nbsp; <span id="sys-ver">v3.1.4</span> &nbsp;|&nbsp; 刷新: 1s
 </div>
 
 <script>
@@ -236,7 +236,7 @@ async function otaCheck() {
 
 async function otaInstall() {
   const btn = document.getElementById('btn-ota-install');
-  if (!confirm('将下载并安装新固件, 安装期间设备会重启。确定继续?')) return;
+  if (!confirm('将下载并安装新应用, 安装期间设备会重启。确定继续?')) return;
   btn.textContent = '⏳ 下载中...';
   btn.disabled = true;
   document.getElementById('btn-ota-check').disabled = true;

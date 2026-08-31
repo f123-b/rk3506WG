@@ -1,6 +1,6 @@
 /**
  * @file    data_recorder.c
- * @brief   数据记录器实现 — 批量写入 + 离线缓存
+ * @brief   数据记录器实现 — 内存批量写入 SQLite
  */
 
 #include "data_recorder.h"
@@ -15,7 +15,7 @@
 
 #include "../database.h"
 
-#define DATA_BUF_MAX  120  /**< 缓冲区最大条数 (2小时数据) */
+#define DATA_BUF_MAX  120  /**< 缓冲区最大条数；实际时长取决于采样频率 */
 
 /* ==================== 模块状态 ==================== */
 static data_record_t buffer[DATA_BUF_MAX];
@@ -23,8 +23,33 @@ static int buffered_count = 0;
 static time_t last_flush_time = 0;
 static pthread_mutex_t rec_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-/* 离线缓存: MQTT 断连期间的数据标记 */
+/* MQTT 断连期间的记录统计，不提供断线补传。 */
 static int offline_count = 0;
+
+static void data_recorder_flush_locked(void)
+{
+    if (buffered_count == 0) return;
+
+    sensor_record_t records[DATA_BUF_MAX];
+    int valid_count = 0;
+    for (int i = 0; i < buffered_count; i++) {
+        if (!buffer[i].valid) continue;
+        records[valid_count].timestamp = buffer[i].timestamp;
+        records[valid_count].temperature = buffer[i].temperature;
+        records[valid_count].humidity = buffer[i].humidity;
+        records[valid_count].valid = buffer[i].valid;
+        valid_count++;
+    }
+
+    if (valid_count == 0 || database_insert_records(records, valid_count) == 0) {
+        LOG_DEBUG("Flushed %d/%d records to DB", valid_count, buffered_count);
+        buffered_count = 0;
+        last_flush_time = time(NULL);
+    } else {
+        LOG_ERROR("Database batch insert failed; retaining %d buffered records",
+                  buffered_count);
+    }
+}
 
 /* ==================== 公开 API ==================== */
 
@@ -55,7 +80,13 @@ void data_recorder_record(float temp, float humi, bool valid)
     /* 缓冲区溢出时强制 flush */
     if (buffered_count >= DATA_BUF_MAX) {
         LOG_WARN("Data buffer full, flushing...");
-        data_recorder_flush();
+        data_recorder_flush_locked();
+    }
+
+    if (buffered_count >= DATA_BUF_MAX) {
+        LOG_ERROR("Data buffer remains full after flush; dropping newest record");
+        pthread_mutex_unlock(&rec_mutex);
+        return;
     }
 
     /* 添加到缓冲区 */
@@ -77,28 +108,7 @@ void data_recorder_record(float temp, float humi, bool valid)
 void data_recorder_flush(void)
 {
     pthread_mutex_lock(&rec_mutex);
-
-    if (buffered_count == 0) {
-        pthread_mutex_unlock(&rec_mutex);
-        return;
-    }
-
-    int written = 0;
-    for (int i = 0; i < buffered_count; i++) {
-        data_record_t *rec = &buffer[i];
-        /* 仅写入有效数据 */
-        if (rec->valid) {
-            if (database_insert(rec->temperature, rec->humidity,
-                                rec->valid) == 0) {
-                written++;
-            }
-        }
-    }
-
-    LOG_DEBUG("Flushed %d/%d records to DB", written, buffered_count);
-
-    buffered_count = 0;
-    last_flush_time = time(NULL);
+    data_recorder_flush_locked();
     pthread_mutex_unlock(&rec_mutex);
 }
 
@@ -114,9 +124,12 @@ int data_recorder_get_buffered_count(void)
 void data_recorder_tick(void)
 {
     time_t now = time(NULL);
+    bool should_flush;
+    pthread_mutex_lock(&rec_mutex);
+    should_flush = (now - last_flush_time >= DB_WRITE_INTERVAL);
+    pthread_mutex_unlock(&rec_mutex);
 
-    /* 到达写入间隔时自动 flush */
-    if (now - last_flush_time >= DB_WRITE_INTERVAL) {
+    if (should_flush) {
         data_recorder_flush();
     }
 }
@@ -132,8 +145,11 @@ void data_recorder_close(void)
     /* 退出前写入所有缓冲数据 */
     data_recorder_flush();
 
-    if (offline_count > 0) {
-        LOG_INFO("Session had %d offline-cached records", offline_count);
+    pthread_mutex_lock(&rec_mutex);
+    int session_offline_count = offline_count;
+    pthread_mutex_unlock(&rec_mutex);
+    if (session_offline_count > 0) {
+        LOG_INFO("Session had %d offline-cached records", session_offline_count);
     }
 
     database_close();

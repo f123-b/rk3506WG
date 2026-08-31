@@ -77,7 +77,7 @@ int rs485_write(const uint8_t *data, size_t len);
 int rs485_read(uint8_t *buf, size_t len, int timeout_ms);
 
 /**
- * @brief 获取 UART 文件描述符 (供 libmodbus 直接使用)
+ * @brief 获取 UART 文件描述符（供底层诊断或兼容调用）
  * @return fd, 失败返回 -1
  */
 int rs485_get_fd(void);

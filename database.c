@@ -64,11 +64,18 @@ int database_init(void)
     if (rc != SQLITE_OK) {
         fprintf(stderr, "SQL error: %s\n", err_msg);
         sqlite3_free(err_msg);
+        sqlite3_close(db);
+        db = NULL;
         return -1;
     }
 
     printf("Database initialized: %s\n", DB_PATH);
     return 0;
+}
+
+bool database_is_ready(void)
+{
+    return db != NULL;
 }
 
 /* ==================== 插入记录 ==================== */
@@ -94,6 +101,53 @@ int database_insert(float temp, float humi, bool valid)
     sqlite3_finalize(stmt);
 
     return rc == SQLITE_DONE ? 0 : -1;
+}
+
+int database_insert_records(const sensor_record_t *records, int count)
+{
+    if (!db || !records || count < 0) return -1;
+    if (count == 0) return 0;
+
+    char *err_msg = NULL;
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE TRANSACTION;", NULL, NULL,
+                     &err_msg) != SQLITE_OK) {
+        if (err_msg) sqlite3_free(err_msg);
+        return -1;
+    }
+
+    const char *sql =
+        "INSERT INTO sensor_data (timestamp, temperature, humidity, valid) "
+        "VALUES (?, ?, ?, ?);";
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+        return -1;
+    }
+
+    for (int i = 0; i < count; i++) {
+        sqlite3_reset(stmt);
+        sqlite3_clear_bindings(stmt);
+        sqlite3_bind_int64(stmt, 1, (sqlite3_int64)records[i].timestamp);
+        sqlite3_bind_double(stmt, 2, (double)records[i].temperature);
+        sqlite3_bind_double(stmt, 3, (double)records[i].humidity);
+        sqlite3_bind_int(stmt, 4, records[i].valid ? 1 : 0);
+
+        if (sqlite3_step(stmt) != SQLITE_DONE) {
+            sqlite3_finalize(stmt);
+            sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+            return -1;
+        }
+    }
+
+    sqlite3_finalize(stmt);
+    if (sqlite3_exec(db, "COMMIT;", NULL, NULL, &err_msg) != SQLITE_OK) {
+        if (err_msg) sqlite3_free(err_msg);
+        sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+        return -1;
+    }
+
+    return 0;
 }
 
 /* ==================== 查询历史 ==================== */

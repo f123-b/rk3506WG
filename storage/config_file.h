@@ -1,11 +1,10 @@
 /**
  * @file    config_file.h
- * @brief   JSON 配置文件读写 (简单实现, 零外部依赖)
+ * @brief   JSON 配置文件读写
  *
  * 原理:
- *   使用字符串查找 (strstr) 解析 JSON, 不依赖 cJSON 等库。
- *   支持简单的 key-value 读取 (string/int/float/bool)。
- *   适合嵌入式项目的配置文件需求。
+ *   使用 cJSON 解析完整 JSON 对象，支持字符串、整数、浮点数和布尔值。
+ *   字符串读取缓冲区为线程局部存储，不使用共享静态缓冲区。
  *
  * 使用方法:
  *   config_file_t *cfg = config_load("config.json");

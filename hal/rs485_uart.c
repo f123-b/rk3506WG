@@ -167,9 +167,11 @@ void rs485_set_rx_mode(void)
 
 int rs485_write(const uint8_t *data, size_t len)
 {
-    if (uart_fd < 0) return -1;
-
     pthread_mutex_lock(&rs485_mutex);
+    if (uart_fd < 0) {
+        pthread_mutex_unlock(&rs485_mutex);
+        return -1;
+    }
 
     rs485_set_tx_mode();
 
@@ -192,9 +194,11 @@ int rs485_write(const uint8_t *data, size_t len)
 
 int rs485_read(uint8_t *buf, size_t len, int timeout_ms)
 {
-    if (uart_fd < 0) return -1;
-
     pthread_mutex_lock(&rs485_mutex);
+    if (uart_fd < 0) {
+        pthread_mutex_unlock(&rs485_mutex);
+        return -1;
+    }
 
     if (timeout_ms > 0) {
         fd_set rfds;
@@ -239,6 +243,7 @@ void rs485_flush(void)
 
 void rs485_close(void)
 {
+    pthread_mutex_lock(&rs485_mutex);
     rs485_set_rx_mode();
 
     if (uart_fd >= 0) {
@@ -257,5 +262,6 @@ void rs485_close(void)
         }
     }
 
+    pthread_mutex_unlock(&rs485_mutex);
     LOG_INFO("RS485 closed");
 }

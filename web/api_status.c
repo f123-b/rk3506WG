@@ -6,9 +6,9 @@
  * {
  *   "mqtt":   {"connected":true,  "retries":0,  "broker":"192.168.5.10:1883"},
  *   "modbus": {"active":true,  "slaves":1,  "tx_count":5,  "rx_count":3},
- *   "can":    {"active":true,  "tx_count":12, "rx_count":45, "state":"ERROR-ACTIVE"},
- *   "ota":    {"status":"idle",  "progress":0,  "version":"3.0.0"},
- *   "system": {"version":"3.0.0", "uptime":3600, "ntp_ok":false}
+ *   "can":    {"active":true,  "tx_count":12, "rx_count":45},
+ *   "ota":    {"status":"idle",  "progress":0,  "version":"3.1.4"},
+ *   "system": {"version":"3.1.4", "uptime":3600, "ntp_ok":false}
  * }
  */
 #include "api_status.h"
@@ -26,16 +26,20 @@ extern void web_send_response(int client_fd, int status,
                               const char *content_type,
                               const char *body, size_t body_len);
 
-/* 外部全局变量: main.c 中的 CAN / Modbus 计数器 */
-extern int can_tx_cnt;
-extern int can_rx_cnt;
-extern int rs485_tx_cnt;
+/* main.c 提供线程安全的计数器快照接口。 */
+extern void app_get_can_counters(int *tx_count, int *rx_count);
+extern int app_get_rs485_tx_count(void);
+extern long app_get_uptime_seconds(void);
 
 void api_status_handle(int client_fd)
 {
     /* ---- MQTT ---- */
     bool mqtt_ok = mqtt_client_is_connected();
     int  mqtt_retries = mqtt_client_get_retry_count();
+    int can_tx_count = 0;
+    int can_rx_count = 0;
+    app_get_can_counters(&can_tx_count, &can_rx_count);
+    int rs485_tx_count = app_get_rs485_tx_count();
 
     /* ---- Modbus: 从 data_bus 获取 modbus 数据点 ---- */
     data_point_t modbus_pts[DATA_BUS_MAX_POINTS];
@@ -111,16 +115,16 @@ void api_status_handle(int client_fd)
         /* modbus */
         modbus_count > 0 ? "true" : "false",
         modbus_count,
-        rs485_tx_cnt,
+         rs485_tx_count,
         /* can */
         can_count > 0 ? "true" : "false",
         can_count,
-        can_tx_cnt, can_rx_cnt,
+         can_tx_count, can_rx_count,
         /* ota */
         ota_str, ota_get_progress(),
         ver, OTA_DEFAULT_SERVER,
         /* system */
-        ver, (long)time(NULL),
+         ver, app_get_uptime_seconds(),
         ntp_ok ? "true" : "false");
 
     web_send_response(client_fd, 200, "application/json", json, len);

@@ -35,6 +35,9 @@ extern "C" {
  */
 int hal_display_init(void);
 
+/** @brief 释放 DRM framebuffer 和文件描述符 */
+void hal_display_deinit(void);
+
 /**
  * @brief 获取 framebuffer 内存指针 (LVGL DIRECT 渲染目标)
  */

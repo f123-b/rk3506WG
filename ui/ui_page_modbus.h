@@ -31,16 +31,8 @@ void ui_page_modbus_set_led(bool active);
 /** 设置轮询状态显示 */
 void ui_page_modbus_set_poll_status(bool polling, int interval_ms);
 
-/** 切换自动轮询开关 (页面内部状态) */
-void ui_page_modbus_toggle_auto(void);
-int  ui_page_modbus_get_auto_state(void);
-
-/* 按钮获取函数 */
+/* 可选测试按钮获取函数 */
 lv_obj_t * ui_page_modbus_get_btn_send(void);
-lv_obj_t * ui_page_modbus_get_btn_scan(void);
-lv_obj_t * ui_page_modbus_get_btn_read(void);
-lv_obj_t * ui_page_modbus_get_btn_auto(void);
-lv_obj_t * ui_page_modbus_get_test_btn(void);  /* 兼容旧 API */
 
 #ifdef __cplusplus
 }

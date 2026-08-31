@@ -1,79 +1,57 @@
-1. 项目概述
-项目名称：基于 RK3506G 的多协议工业边缘计算网关
-核心功能：
+项目概述
+========
 
-通过 RS485 接口 轮询 Modbus RTU 从站设备，采集工业传感器/执行器数据。
+项目名称：环境监测站（Environment Monitor）
+程序目标：my_test
+目标平台：RK3506G Linux
+开发语言：C11
+项目负责人：本人独立完成
 
-通过 CAN 总线 采集车辆或工业设备实时数据。
+当前代码确认的功能：
 
-本地 SQLite 数据库 存储所有历史数据。
+1. MQTT 客户端接收温度、湿度和有效状态 JSON 数据。
+2. RS485 UART 上运行 Modbus RTU 主站轮询。
+3. SocketCAN 接收和解析 CAN 报文。
+4. LVGL 触摸屏界面显示 MQTT、Modbus、CAN 和 OTA 页面。
+5. SQLite 保存有效温湿度记录。
+6. HTTP 提供当前数据、设备数据、系统状态和 OTA 接口。
+7. NTP 同步系统时间。
+8. 应用程序 OTA 下载、SHA256 校验、原子替换和健康检查回滚。
 
-LVGL 触摸屏界面 实时显示设备状态。
+数据流
+======
 
-HTTP Server 提供数据查询与系统管理 API（浏览器远程访问）。
+MQTT 网络线程 → 温湿度共享数据 → 主线程 UI 更新 / 数据记录器
 
-MQTT Client 将数据上报到本地 Mosquitto Broker（部署于 RK3506G），并能与云平台对接。
+Modbus 轮询线程 → Data Bus → HTTP 设备接口
 
-NTP 时间同步、OTA 固件升级、配置热加载 等企业级特性。
+CAN 接收线程 → 信号解析 → Data Bus → HTTP 设备接口
 
-技术栈：C 语言、Linux (Buildroot/Yocto)、LVGL、libmodbus、SocketCAN、SQLite3、libmosquitto、libgpiod。
+CAN 原始帧 → 线程安全待处理缓冲区 → 主线程 UI 更新
 
-2. 系统总体架构
-text
-┌─────────────┐     WiFi / MQTT      ┌────────────────────────────┐
-│  ESP32-C6   │◄────────────────────►│        RK3506G 开发板       │
-│ 传感器节点   │                      │                            │
-│ (可选 Modbus │                      │  - MQTT Broker (Mosquitto) │
-│  从站演示)   │                      │  - my_test 程序            │
-└─────────────┘                      │    ├─ Modbus Master 线程    │
-                                     │    ├─ CAN Manager 线程      │
-                                     │    ├─ MQTT Client 线程      │
-        RS485 总线                   │    ├─ HTTP Server 线程      │
-────────────┬────────                 │    ├─ LVGL UI 线程         │
-            │                         │    ├─ SQLite 存储模块       │
-      [MAX485 模块]                   │    ├─ OTA 管理器            │
-            │ UART3 + GPIO 方向控制    │    └─ NTP 客户端            │
-            │                         │                            │
-            │           CAN 总线       │                            │
-            │       ─────┼─────        │                            │
-            │       [SN65HVD230]       │                            │
-            │            │ CAN0_TX/RX │                            │
-            │            │            │                            │
-            ▼            ▼            ▼                            │
-      Modbus 设备     CAN 节点      电脑浏览器 (HTTP :8080)          │
-└────────────────────────────────────────────────────────────────┘
-数据流：
+当前没有独立的存储线程、消息队列、共享内存或进程间通信实现。
 
-Modbus 线程循环读从站 → 数据入队 → 存储线程写 SQLite + UI 更新 + MQTT 发布。
+主要代码位置
+============
 
-CAN 线程接收 SocketCAN 帧 → 数据入队 → 同上。
+- 程序入口：main.c
+- MQTT：services/mqtt_client.c
+- Modbus：services/modbus_master.c
+- CAN：services/can_manager.c、hal/can_socket.c
+- RS485：hal/rs485_uart.c
+- 数据总线：services/data_bus.c
+- SQLite：database.c
+- 数据记录：services/data_recorder.c
+- HTTP：web_server.c、web/
+- OTA：ota_manager.c
+- UI：ui/
+- 构建：CMakeLists.txt
 
-HTTP API 读取 SQLite 或内存缓存返回给浏览器。
+功能边界
+========
 
-触摸屏 LVGL 从共享内存/消息队列获取最新数据。
-
-3. 硬件连接详细说明
-3.1 引脚分配表 (J9 连接器)
-功能	开发板引脚 J9	连接至模块	信号说明
-CAN0_RX	20	SN65HVD230 的 RXD	接收 CAN 数据
-CAN0_TX	21	SN65HVD230 的 TXD	发送 CAN 数据
-UART3_RX	23	MAX485 的 RO	接收 RS485 数据
-UART3_TX	24	MAX485 的 DI	发送 RS485 数据
-RS485 方向控制	25 (UART2_RX)	MAX485 的 DE/RE (短接)	GPIO 输出，高电平=发送，低电平=接收
-GND	接所有模块 GND	各模块 GND 引脚	共地
-3.3V	供电	SN65HVD230 VCC	CAN 收发器供电
-5V (或 3.3V)	视 MAX485 版本	MAX485 VCC	若为 5V 版本需电平转换，推荐 3.3V 模块
-关键配置：
-
-25 脚原本是 UART2_RX，必须在 设备树 中禁用 UART2，将其释放为普通 GPIO。
-
-RS485 总线两端需加 120Ω 终端电阻，MAX485 模块上一般有预留焊接位。
-
-SN65HVD230 CAN 收发器需在 CAN_H 和 CAN_L 之间加 120Ω 终端电阻（模块可能自带）。
-
-3.2 其他辅助硬件
-USB 转 RS-485：连接 PC，用 Modbus Poll / Slave 软件模拟主站或从站进行开发调试。
-
-USB 转 CAN：连接 PC，用 cangaroo 或 can-utils 工具模拟 CAN 节点或监视总线。
-
-ESP32-C6：保持 WiFi 连接，通过 MQTT 上报自身传感器数据，
+- 当前 OTA 仅支持应用程序更新，不支持固件分区刷写。
+- Web 历史数据随机模拟接口已删除。
+- MQTT 断线期间只做记录统计，不提供断线补传。
+- HTTPS、用户认证和完整数字签名校验不属于当前实现。
+- 项目内没有 systemd、SysV init 或独立守护进程配置。
