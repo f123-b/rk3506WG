@@ -163,9 +163,23 @@ int mqtt_client_start(void)
 void mqtt_client_set_auth(const char *id, const char *secret)
 {
     if (!id || !secret) return;
+
     strncpy(device_id, id, sizeof(device_id) - 1);
+    device_id[sizeof(device_id) - 1] = '\0';
     strncpy(device_secret, secret, sizeof(device_secret) - 1);
-    LOG_INFO("MQTT auth credentials stored for device: %s", device_id);
+    device_secret[sizeof(device_secret) - 1] = '\0';
+
+    /* 允许 init 前设置，也允许运行中更新。
+     * 如果 mosq 已创建，立即同步给 libmosquitto，下一次 connect/reconnect 生效。 */
+    if (mosq && device_id[0] && device_secret[0]) {
+        int rc = mosquitto_username_pw_set(mosq, device_id, device_secret);
+        if (rc != MOSQ_ERR_SUCCESS) {
+            LOG_WARN("MQTT auth apply failed (rc=%d)", rc);
+        }
+    }
+
+    LOG_INFO("MQTT auth credentials %s",
+             device_id[0] ? "configured" : "cleared");
 }
 
 bool mqtt_client_is_connected(void)
