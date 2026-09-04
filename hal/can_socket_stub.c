@@ -9,11 +9,15 @@
 #include <unistd.h>
 
 static bool initialized = false;
+static int tx_count = 0;
+static int rx_count = 0;
 
 int can_init(const char *ifname, int bitrate)
 {
     (void)ifname; (void)bitrate;
     initialized = true;
+    tx_count = 0;
+    rx_count = 0;
     LOG_INFO("CAN stub: %s %d bps (simulated)", ifname, bitrate);
     return 0;
 }
@@ -48,6 +52,7 @@ int can_read_frame(can_frame_t *frame, int timeout_ms)
         frame->data[4] = 0x55; frame->data[5] = 0x66;
         frame->data[6] = 0x77; frame->data[7] = 0x88;
         printf("[CAN SIM] RX ID=0x100 DLC=8 RPM=%d\n", rpm);
+        rx_count++;
         return 1;
     }
     return 0;
@@ -61,8 +66,11 @@ int can_write_frame(const can_frame_t *frame)
     for (int i = 0; i < frame->can_dlc && i < 8; i++)
         off += snprintf(data_str + off, sizeof(data_str) - off, "%02X ", frame->data[i]);
     printf("[CAN SIM] TX ID=0x%03X DLC=%d [%s]\n", frame->can_id, frame->can_dlc, data_str);
+    tx_count++;
     return 0;
 }
 
 int  can_get_fd(void) { return -1; }
+int  can_get_tx_count(void) { return tx_count; }
+int  can_get_rx_count(void) { return rx_count; }
 void can_close(void) { initialized = false; }
