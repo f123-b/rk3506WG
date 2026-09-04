@@ -315,7 +315,7 @@ void modbus_master_set_polling(bool enabled)
 
 bool modbus_master_is_polling(void)
 {
-    return atomic_load(&polling_enabled);
+    return atomic_load(&running) && atomic_load(&polling_enabled);
 }
 
 int modbus_master_get_tx_count(void)
