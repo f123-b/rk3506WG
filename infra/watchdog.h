@@ -44,6 +44,13 @@ void watchdog_stop(void);
  */
 void watchdog_feed(void);
 
+/**
+ * @brief 主线程心跳。
+ * LVGL 主循环/定时器应周期调用；如果心跳长时间不更新，
+ * 后台看门狗线程会停止喂狗，让硬件 watchdog 复位系统。
+ */
+void watchdog_heartbeat(void);
+
 #ifdef __cplusplus
 }
 #endif
