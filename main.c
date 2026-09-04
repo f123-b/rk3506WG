@@ -249,6 +249,15 @@ static void create_tab_bar(lv_obj_t *parent)
     lv_obj_clear_flag(g_tab_indicators[0], LV_OBJ_FLAG_HIDDEN);
 }
 
+/* DataBus 持久化订阅：MQTT 已写 sensor_data，通用表只记录 Modbus/CAN */
+static void data_bus_persist_cb(const data_point_t *point, void *user_data)
+{
+    (void)user_data;
+    if (point && point->source != DATA_SOURCE_MQTT) {
+        data_recorder_record_data_point(point);
+    }
+}
+
 /* ==================== MQTT 回调 ==================== */
 static void on_sensor_data(float temp, float humi, bool valid)
 {
@@ -652,7 +661,7 @@ static void services_init_timer_cb(lv_timer_t *timer)
     (void)timer;
     LOG_INFO("=== Deferred service init start ===");
 
-    data_recorder_init();
+    bool recorder_ready = (data_recorder_init() == 0);
     web_server_start(HTTP_PORT);
     LOG_INFO("HTTP server: http://0.0.0.0:%d", HTTP_PORT);
 
@@ -663,6 +672,9 @@ static void services_init_timer_cb(lv_timer_t *timer)
 
     /* DataBus 必须先于任何 Producer 启动，避免 MQTT 首包在 init 后被清空 */
     data_bus_init();
+    if (recorder_ready) {
+        data_bus_subscribe(data_bus_persist_cb, NULL);
+    }
 
     /* 认证必须在首次 connect 前配置 */
     mqtt_client_set_auth(MQTT_DEVICE_ID, MQTT_DEVICE_SECRET);
