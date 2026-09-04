@@ -83,7 +83,8 @@ typedef struct {
     char    filename[128];      /**< 全量固件/应用 文件名 */
     char    sha256[65];         /**< 全量文件 SHA256 校验和 (hex) */
     char    changelog[512];     /**< 更新日志 */
-    char    signature[1025];    /**< manifest RSA 签名 (hex, 支持至 RSA-4096) */\n    char    signature_algorithm[32]; /**< 签名算法, 当前必须为 RSA-PSS-SHA256 */
+    char    signature[1025];    /**< manifest RSA 签名 (hex, 支持至 RSA-4096) */
+    char    signature_algorithm[32]; /**< 签名算法, 当前必须为 RSA-PSS-SHA256 */
     int64_t size;               /**< 全量文件大小 (字节) */
     bool    force_update;       /**< 是否强制更新 */
 
