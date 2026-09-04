@@ -104,11 +104,22 @@ typedef void (*ota_progress_cb)(int percent, const char *msg);
  * @param signature_hex  期望的签名 (hex 字符串, 来自 version.json)
  * @return true=签名有效, false=签名无效
  *
- * 如果不设置此回调, 则跳过签名验证 (仅 SHA256)。
- * 实现示例: 读取公钥 → 验证 ECDSA/RSA 签名。
+ * 如果 version.json 提供 signature，则必须设置此回调并验证通过；
+ * OTA_REQUIRE_SIGNATURE=1 时，服务器未提供 signature 也会拒绝升级。
+ * 实现示例: 读取公钥 → 验证 ECDSA/RSA/ED25519 签名。
  */
 typedef bool (*ota_signature_verify_cb)(const char *firmware_path,
                                         const char *signature_hex);
+
+/**
+ * @brief 平台固件写入回调
+ * @param image_path 已下载并通过完整性/签名校验的固件镜像
+ * @return true=已经安全写入目标分区并完成启动切换准备
+ *
+ * 固件分区布局与 Bootloader/A-B 策略强依赖具体产品，因此核心 OTA 不直接
+ * 执行危险的 dd 命令，而由 BSP 层注册平台实现。
+ */
+typedef bool (*ota_firmware_apply_cb)(const char *image_path);
 
 /* ==================== API ==================== */
 
@@ -145,6 +156,9 @@ void ota_set_progress_callback(ota_progress_cb cb);
  * @param cb 签名验证函数指针 (NULL=跳过签名验证)
  */
 void ota_set_signature_verify_callback(ota_signature_verify_cb cb);
+
+/** 注册平台 Firmware OTA 写入后端；未注册时 Firmware 模式会安全失败 */
+void ota_set_firmware_apply_callback(ota_firmware_apply_cb cb);
 
 /**
  * @brief 写入健康标志文件 (应用启动后调用, 表示正常运行)
