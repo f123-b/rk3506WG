@@ -1,7 +1,9 @@
-# 环境监测站 (Environment Monitor) v3.1.3
+# 环境监测站 (Environment Monitor) v3.1.5
 
 基于 **RK3506 + LVGL v9.1 + MQTT + SQLite3 + HTTP + NTP + OTA + Modbus + CAN** 的嵌入式物联网边缘网关系统。
 4 标签页 UI（MQTT / Modbus / CAN / OTA），多协议工业传感器接入，Web 远程监控，App 热更新 OTA（备份回滚 + 断点续传 + 签名验证框架）。
+
+> **v3.1.5 工程修复**：修复 DataRecorder 递归锁死锁、LVGL 跨线程更新、MQTT/CAN/Modbus 共享状态竞争；MQTT/Modbus/CAN 统一接入 DataBus，Modbus/CAN 通过 RAM 缓冲写入 device_data；Web 历史接口改为真实 SQLite 数据；Watchdog 改为主循环心跳；补齐 CAN 扩展帧/Motorola 解析、真实健康检查、Host Simulation Stub 与 OTA 安全后端约束。
 
 ---
 
