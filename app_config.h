@@ -10,7 +10,7 @@
 #define APP_CONFIG_H
 
 /* ==================== 应用版本号 (OTA 升级依据) ==================== */
-#define APP_VERSION  "3.1.4"
+#define APP_VERSION  "3.1.5"
 
 /* ==================== MQTT 配置 ==================== */
 #define MQTT_BROKER   "192.168.5.10"    /**< MQTT 服务器 (开发板本地) */
