@@ -17,9 +17,10 @@
 #include <time.h>
 #include <sys/ioctl.h>
 #include <linux/watchdog.h>
+#include <stdatomic.h>
 
 static int wd_fd = -1;
-static bool wd_running = false;
+static atomic_bool atomic_store(&wd_running, false);
 static bool wd_thread_created = false;
 static pthread_t wd_thread;
 static pthread_mutex_t heartbeat_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -94,11 +95,11 @@ int watchdog_init(int timeout_sec)
     }
 
     watchdog_heartbeat();
-    wd_running = true;
+    atomic_store(&wd_running, true);
     if (pthread_create(&wd_thread, NULL, watchdog_thread_func,
                        (void *)(intptr_t)actual_timeout) != 0) {
         LOG_ERROR("Watchdog thread creation failed");
-        wd_running = false;
+        atomic_store(&wd_running, false);
         close(wd_fd);
         wd_fd = -1;
         return -1;
@@ -118,7 +119,7 @@ void watchdog_feed(void)
 
 void watchdog_stop(void)
 {
-    wd_running = false;
+    atomic_store(&wd_running, false);
 
     if (wd_thread_created) {
         pthread_join(wd_thread, NULL);
