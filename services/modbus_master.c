@@ -20,6 +20,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <errno.h>
+#include <stdatomic.h>
 
 /* ==================== 配置 ==================== */
 #define MAX_SLAVES           8     /**< 最大从站数量 */
@@ -31,7 +32,8 @@ static modbus_slave_config_t slaves[MAX_SLAVES];
 static int slave_count = 0;
 static modbus_data_callback_t user_callback = NULL;
 static pthread_t poll_thread;
-static bool running = false;
+static atomic_bool running = false;
+static atomic_bool polling_enabled = true;
 static char dev_name[64];
 static int dev_baud;
 static int gpio_pin_num;
@@ -158,8 +160,13 @@ static void *modbus_poll_thread_func(void *arg)
 
     LOG_INFO("Modbus: poll thread started, %d slaves", slave_count);
 
-    while (running) {
-        for (int i = 0; i < slave_count && running; i++) {
+    while (atomic_load(&running)) {
+        if (!atomic_load(&polling_enabled)) {
+            usleep(100000);
+            continue;
+        }
+
+        for (int i = 0; i < slave_count && atomic_load(&running); i++) {
             modbus_slave_config_t *slv = &slaves[i];
 
             int nb = modbus_read_regs_manual(
@@ -211,8 +218,9 @@ static void *modbus_poll_thread_func(void *arg)
             /* 轮询间隔 */
             int interval = slv->poll_interval_ms;
             if (interval < 100) interval = 100;
-            for (int t = 0; t < interval / 100 && running; t++) {
-                usleep(100000);  /* 100ms 分片, 便于及时退出 */
+            for (int t = 0; t < interval / 100 && atomic_load(&running); t++) {
+                if (!atomic_load(&polling_enabled)) break;
+                usleep(100000);  /* 100ms 分片, 便于及时退出/暂停 */
             }
         }
     }
@@ -267,10 +275,11 @@ int modbus_master_start(void)
         return 0;
     }
 
-    running = true;
+    atomic_store(&running, true);
+    atomic_store(&polling_enabled, true);
     if (pthread_create(&poll_thread, NULL, modbus_poll_thread_func, NULL) != 0) {
         LOG_ERROR("Modbus: thread create failed");
-        running = false;
+        atomic_store(&running, false);
         return -1;
     }
 
@@ -279,7 +288,7 @@ int modbus_master_start(void)
 
 void modbus_master_stop(void)
 {
-    running = false;
+    atomic_store(&running, false);
     if (poll_thread) {
         pthread_join(poll_thread, NULL);
     }
@@ -290,4 +299,15 @@ void modbus_master_stop(void)
 int modbus_master_get_slave_count(void)
 {
     return slave_count;
+}
+
+void modbus_master_set_polling(bool enabled)
+{
+    atomic_store(&polling_enabled, enabled);
+    LOG_INFO("Modbus: polling %s", enabled ? "enabled" : "paused");
+}
+
+bool modbus_master_is_polling(void)
+{
+    return atomic_load(&polling_enabled);
 }
