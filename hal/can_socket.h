@@ -92,6 +92,10 @@ int can_write_frame(const can_frame_t *frame);
  */
 int can_get_fd(void);
 
+/** 获取底层实际成功发送/接收的 CAN 帧计数 */
+int can_get_tx_count(void);
+int can_get_rx_count(void);
+
 /**
  * @brief 关闭 CAN 接口
  */
