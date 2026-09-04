@@ -10,7 +10,7 @@
 #define APP_CONFIG_H
 
 /* ==================== 应用版本号 (OTA 升级依据) ==================== */
-#define APP_VERSION  "3.1.5"
+#define APP_VERSION  "3.1.6"
 
 /* ==================== MQTT 配置 ==================== */
 #define MQTT_BROKER   "192.168.5.10"    /**< MQTT 服务器 (开发板本地) */
@@ -46,7 +46,7 @@
 #define OTA_APP_INSTALL_PATH  "/oem/my_test"               /**< App OTA: 应用安装目标路径 */
 #define OTA_APP_STOP_CMD      "killall my_test"            /**< App OTA: 停止应用命令 */
 #define OTA_APP_START_CMD     "/oem/my_test &"            /**< App OTA: 启动应用命令 */
-#define OTA_REQUIRE_SIGNATURE  0                           /**< 1=服务器必须提供签名且必须验证 */
+#define OTA_REQUIRE_SIGNATURE  1                           /**< 1=强制要求 OTA manifest 数字签名 */\n#define OTA_PUBLIC_KEY_PATH     "/oem/keys/ota_public_key.pem" /**< 设备端 RSA 公钥 PEM */\n#define OTA_SIGNATURE_ALGORITHM "RSA-PSS-SHA256"            /**< 内置验签算法 */
 
 /* ==================== 日志配置 ==================== */
 #define LOG_FILE_PATH       "/tmp/my_test.log"  /**< 日志文件路径 (NULL=不写文件) */
