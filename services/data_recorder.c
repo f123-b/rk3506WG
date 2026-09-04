@@ -26,6 +26,31 @@ static pthread_mutex_t rec_mutex = PTHREAD_MUTEX_INITIALIZER;
 /* 离线缓存: MQTT 断连期间的数据标记 */
 static int offline_count = 0;
 
+/* ==================== 内部 flush ==================== */
+
+/**
+ * @brief 在已经持有 rec_mutex 的情况下刷新缓冲区
+ * @note 仅允许由本文件内部调用，避免 data_recorder_record() 缓冲区满时
+ *       再次进入 data_recorder_flush() 造成普通 pthread mutex 自锁。
+ */
+static void data_recorder_flush_locked(void)
+{
+    if (buffered_count == 0) return;
+
+    int written = 0;
+    for (int i = 0; i < buffered_count; i++) {
+        data_record_t *rec = &buffer[i];
+        if (rec->valid &&
+            database_insert(rec->temperature, rec->humidity, rec->valid) == 0) {
+            written++;
+        }
+    }
+
+    LOG_DEBUG("Flushed %d/%d records to DB", written, buffered_count);
+    buffered_count = 0;
+    last_flush_time = time(NULL);
+}
+
 /* ==================== 公开 API ==================== */
 
 int data_recorder_init(void)
@@ -52,10 +77,10 @@ void data_recorder_record(float temp, float humi, bool valid)
 {
     pthread_mutex_lock(&rec_mutex);
 
-    /* 缓冲区溢出时强制 flush */
+    /* 缓冲区满时在当前锁域内直接刷新，避免递归加锁死锁 */
     if (buffered_count >= DATA_BUF_MAX) {
         LOG_WARN("Data buffer full, flushing...");
-        data_recorder_flush();
+        data_recorder_flush_locked();
     }
 
     /* 添加到缓冲区 */
@@ -77,28 +102,7 @@ void data_recorder_record(float temp, float humi, bool valid)
 void data_recorder_flush(void)
 {
     pthread_mutex_lock(&rec_mutex);
-
-    if (buffered_count == 0) {
-        pthread_mutex_unlock(&rec_mutex);
-        return;
-    }
-
-    int written = 0;
-    for (int i = 0; i < buffered_count; i++) {
-        data_record_t *rec = &buffer[i];
-        /* 仅写入有效数据 */
-        if (rec->valid) {
-            if (database_insert(rec->temperature, rec->humidity,
-                                rec->valid) == 0) {
-                written++;
-            }
-        }
-    }
-
-    LOG_DEBUG("Flushed %d/%d records to DB", written, buffered_count);
-
-    buffered_count = 0;
-    last_flush_time = time(NULL);
+    data_recorder_flush_locked();
     pthread_mutex_unlock(&rec_mutex);
 }
 
