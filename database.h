@@ -78,6 +78,9 @@ int database_get_stats(int hours, sensor_stats_t *stats);
  */
 int database_cleanup(int keep_days);
 
+/** 数据库当前是否已经成功打开 */
+bool database_is_ready(void);
+
 /**
  * @brief 插入一条通用设备数据记录
  * @param source    数据来源 (如 "modbus", "can")
