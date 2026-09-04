@@ -64,7 +64,7 @@ MQTT Broker              Modbus RTU 主站            CAN 管理器
 │  CPU: ARM Cortex-A7, 1GHz  |  RAM: 128MB DDR3                 │
 │  屏幕: 480×800 LCD + 触摸   |  静态IP: 192.168.5.10            │
 │                                                               │
-│  运行 my_test v3.1.3:                                          │
+│  运行 my_test v3.1.6:                                          │
 │  ┌─────────────────────────────────────────────────────────┐  │
 │  │ 4-Tab LVGL UI (DRM DIRECT, 480×800)                      │  │
 │  │  [MQTT] [Modbus] [CAN] [OTA]                             │  │
@@ -270,7 +270,7 @@ my_test/
 | 🔄 **备份+自动回滚** | 覆盖前备份 `.bak`, 新进程在 `lv_refr_now` 后立即写 `/tmp/ota_ok` (~2秒), 后台脚本等15秒后检查, 未检测到则自动回滚 |
 | 📡 **断点续传** | HTTP Range 头支持, 网络中断后从断点继续下载 |
 | 🔒 **并发锁守卫** | `ota_try_lock()`/`ota_unlock()` 防止重复启动OTA |
-| ✍️ **签名验证框架** | 可插拔回调 `ota_signature_verify_cb`, 支持 RSA/ED25519/HMAC |
+| ✍️ **数字签名验签** | OpenSSL EVP + RSA-PSS/SHA-256 验证 signed manifest，设备仅保存公钥 |
 | 📊 **SHA256 进度** | `sha256_file_ex()` 带进度回调, 大文件校验不"卡住" |
 | 🧵 **线程安全进度** | `ota_download_progress` 更新加 mutex 保护 |
 | 📋 **鲁棒 JSON 解析** | 处理空白/转义字符, 比简单 strstr 更可靠 |
@@ -312,7 +312,7 @@ my_test/
 
 **安全设计 (v3.1 增强)**:
 - SHA256 校验 (FIPS 180-4, 独立 infra/sha256 模块, 带进度回调)
-- 可插拔固件签名验证 (RSA/ED25519/HMAC)
+- RSA-PSS/SHA-256 signed manifest 验签（覆盖版本、类型、文件哈希、差分参数和 force_update）
 - 备份+自动回滚 (健康标志文件机制, 防止变砖)
 - 版本号语义化比较防降级
 - 固件大小限制 (16MB)
@@ -547,39 +547,26 @@ RK3506 设备                          OTA 服务器 (你的电脑)
 # 1. 创建 OTA 目录
 mkdir -p ~/ota_server && cd ~/ota_server
 
-# 2. 创建 version.json (App 热更新模式)
-cat > version.json << 'EOF'
-{
-  "device": "RK3506",
-  "version": "3.2.0",
-  "type": "app",
-  "build_date": "2026-07-09",
-  "filename": "my_test_v3.2.0",
-  "size": 1200000,
-  "sha256": "稍后填入",
-  "signature": "",
-  "changelog": "OTA v3.1增强: 备份回滚+断点续传+签名验证+并发锁+JSON增强",
-  "force_update": false,
+# 2. 首次使用时，在安全发布机生成 RSA 密钥
+chmod +x tools/generate_ota_keys.sh
+./tools/generate_ota_keys.sh ~/rk3506_ota_keys
 
-  "delta_url": "my_test_v3.1.0_to_v3.2.0.patch",
-  "delta_sha256": "稍后填入(差分包sha256)",
-  "delta_size": 50000,
-  "base_version": "3.1.0"
-}
-EOF
+# 私钥仅留在发布机；把公钥部署到 RK3506:
+# /oem/keys/ota_public_key.pem
 
-# 3. 复制你刚编译的应用二进制到 OTA 目录
-cp build/my_test ~/ota_server/my_test_v3.1.0
+# 3. 复制/准备待发布应用
+cp build/my_test ~/ota_server/my_test_v3.2.0
 
-# 4. 计算 SHA256 哈希值
-sha256sum ~/ota_server/my_test_v3.1.0 | awk '{print $1}'
-# 输出类似: a1b2c3d4e5f6... (64个十六进制字符)
+# 4. 自动计算 size + SHA256，并生成 RSA-PSS 签名版 version.json
+python3 tools/ota_sign_manifest.py \
+  --artifact ~/ota_server/my_test_v3.2.0 \
+  --private-key ~/rk3506_ota_keys/ota_private_key.pem \
+  --version 3.2.0 \
+  --type app \
+  --output ~/ota_server/version.json \
+  --changelog "OTA 数字签名与可靠性增强"
 
-# 5. 把 SHA256 值填回 version.json 的 "sha256" 字段
-#    用你喜欢的文本编辑器打开 version.json, 粘贴到 "sha256" 的值
-#    同时也更新 "size" 字段为实际文件大小: ls -l ~/ota_server/my_test_v3.1.0
-
-# 6. 启动 HTTP 服务器 (Python 内置的简易服务器)
+# 5. 启动 HTTP 服务器
 python3 -m http.server 9090
 # 输出: Serving HTTP on 0.0.0.0 port 9090
 ```
@@ -632,7 +619,7 @@ App 热更新完成后，应用会自动重启。浏览器刷新后检查 `/api/
 | 新版本启动后自动回到旧版本 | 健康标志未在15秒内写入 (新进程启动太慢) | 检查 DRM/LVGL 初始化是否正常; `cat /tmp/ota_error.log` 查看回滚日志; 健康标志在 `lv_refr_now` 后立即写入 (~2秒), 不依赖延迟服务初始化 |
 | 下载网络中断后从头开始 | 旧版不支持断点续传 | v3.1 支持 HTTP Range 头，自动检测已有文件大小并续传 |
 | 重复触发OTA导致异常 | 旧版无并发保护 | v3.1 使用 `ota_try_lock()` 互斥锁，重复触发返回 "OTA already in progress" |
-| 签名验证失败 | version.json 中 signature 字段错误 | 检查签名生成算法; v3.1.6 默认 `OTA_REQUIRE_SIGNATURE=1`，不能留空；使用 `tools/ota_sign_manifest.py` 生成签名版 `version.json` |
+| 签名验证失败 | manifest 被修改 / 公钥不匹配 / `signature_alg` 错误 / signature 非法 | 检查 `/oem/keys/ota_public_key.pem`，并使用 `tools/ota_sign_manifest.py` 重新生成签名版 `version.json` |
 | OTA 后 HTTP 无响应 | killall 导致旧连接的 CLOSE-WAIT 堆积 | `killall my_test && /oem/my_test &` 重启即可清除; 这是 POSIX socket 服务器的已知局限 |
 
 ### OTA 实测记录 (2026-07-09)
@@ -732,7 +719,7 @@ App 热更新完成后，应用会自动重启。浏览器刷新后检查 `/api/
 | 问题 | 参考回答 |
 |------|---------|
 | **为什么用 SQLite 而非 MySQL?** | 嵌入式场景资源有限 (128MB RAM), SQLite 零配置/零服务/事务支持, 分钟级小数据量完全满足。MySQL 需要独立进程, 不适合嵌入式。 |
-| **OTA 安全如何保证?** | 六重保障: ① SHA256 校验完整性 (FIPS 180-4, 独立模块+进度回调) ② 可插拔签名验证框架 (支持 RSA/ED25519/HMAC) ③ 备份+自动回滚 (健康标志在 `lv_refr_now` 后立即写入, 15秒宽限期, 防止变砖) ④ 版本号语义化比较防降级攻击 ⑤ 固件大小限制 (16MB) 防溢出 ⑥ 非阻塞 connect + select 超时 + 3次重试。App 热更新模式额外优势: 后台脚本原子替换, cp+sync 确保落盘。 |
+| **OTA 安全如何保证?** | 先对规范化 OTA manifest 做 **RSA-PSS/SHA-256 数字签名验签**，签名覆盖版本号、更新类型、文件 SHA256、差分参数和 `force_update`；验签通过后才进入版本决策和下载。下载完成再用 signed SHA256 校验制品，差分升级还会校验补丁和最终完整文件；默认禁止签名旧版本降级。除此之外还有备份自动回滚、固件大小限制、超时重试和并发锁。 |
 | **为什么做 App 热更新而非只做固件升级?** | 固件升级需要 reboot, 中断服务 1-2 分钟。App 热更新只替换应用程序二进制, 通过 kill+rename+restart 在 3-5 秒内完成, Web/MQTT/屏幕自动恢复。Linux 内核支持热替换可执行文件 (inode 引用计数保护), 安全性有保障。 |
 | **Modbus vs CAN 各适用什么场景?** | Modbus RTU (RS485) 适合楼宇/环境监测 (温湿度、CO2), 成本低、距离远 (1200m)。CAN 总线适合汽车/工业自动化 (发动机、PLC), 实时性好、多主模式、差分信号抗干扰强。 |
 | **为什么用数据总线模式?** | 解耦数据生产者和消费者。MQTT/Modbus/CAN 只管采集数据发布到总线, UI/存储只管从总线订阅。新增一种数据源不需要改 UI 代码, 符合 SOLID 原则。 |
