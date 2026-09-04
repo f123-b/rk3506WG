@@ -40,6 +40,7 @@
 #include <errno.h>
 #include <time.h>
 #include <fcntl.h>
+#include <stdatomic.h>
 
 /* ==================== 共享数据 (MQTT 回调→HTTP 线程) ==================== */
 static pthread_mutex_t data_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -49,7 +50,7 @@ static bool  shared_valid = false;
 static time_t shared_last_update = 0;
 
 static int  server_fd = -1;
-static bool server_running = false;
+static atomic_bool atomic_store(&server_running, false);
 static pthread_t server_thread;
 
 /* ==================== 辅助函数 ==================== */
@@ -331,7 +332,7 @@ static void *server_loop(void *arg)
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
         LOG_ERROR("HTTP socket: %s", strerror(errno));
-        server_running = false;
+        atomic_store(&server_running, false);
         return NULL;
     }
 
@@ -345,19 +346,19 @@ static void *server_loop(void *arg)
     if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         LOG_ERROR("HTTP bind: %s", strerror(errno));
         close(server_fd);
-        server_running = false;
+        atomic_store(&server_running, false);
         return NULL;
     }
 
     if (listen(server_fd, HTTP_MAX_CLIENTS) < 0) {
         LOG_ERROR("HTTP listen: %s", strerror(errno));
         close(server_fd);
-        server_running = false;
+        atomic_store(&server_running, false);
         return NULL;
     }
 
     LOG_INFO("HTTP server on port %d", port);
-    server_running = true;
+    atomic_store(&server_running, true);
 
     while (server_running) {
         struct sockaddr_in client_addr;
@@ -385,23 +386,23 @@ static void *server_loop(void *arg)
 
 int web_server_start(int port)
 {
-    if (server_running) return 0;
+    if (atomic_load(&server_running)) return 0;
 
     if (pthread_create(&server_thread, NULL, server_loop,
                        (void *)(intptr_t)port) != 0) {
         return -1;
     }
 
-    for (int i = 0; i < 50 && !server_running; i++) {
+    for (int i = 0; i < 50 && !atomic_load(&server_running); i++) {
         usleep(100000);
     }
 
-    return server_running ? 0 : -1;
+    return atomic_load(&server_running) ? 0 : -1;
 }
 
 void web_server_stop(void)
 {
-    server_running = false;
+    atomic_store(&server_running, false);
     if (server_fd >= 0) {
         shutdown(server_fd, SHUT_RDWR);
         close(server_fd);
@@ -421,5 +422,5 @@ void web_server_update_data(float temp, float humi, bool valid)
 
 bool web_server_is_running(void)
 {
-    return server_running;
+    return atomic_load(&server_running);
 }
