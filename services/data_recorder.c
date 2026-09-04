@@ -38,7 +38,7 @@ static int offline_count = 0;
  */
 static void data_recorder_flush_locked(void)
 {
-    if (buffered_count == 0) return;
+    if (buffered_count == 0 && device_buffered_count == 0) return;
 
     int written = 0;
     for (int i = 0; i < buffered_count; i++) {
