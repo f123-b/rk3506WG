@@ -35,6 +35,12 @@ extern "C" {
 void logger_init(const char *log_file);
 
 /**
+ * @brief 设置最低日志详细级别
+ * @param level 0=ERROR, 1=WARN, 2=INFO, 3=DEBUG
+ */
+void logger_set_level(int level);
+
+/**
  * @brief 关闭日志系统 (关闭文件句柄)
  */
 void logger_close(void);
