@@ -99,11 +99,11 @@ else()
         services/modbus_master.c services/can_manager.c
         ui/ui_dashboard.c ui/ui_ota.c
         ui/ui_page_mqtt.c ui/ui_page_modbus.c ui/ui_page_can.c ui/ui_page_ota.c
-        infra/logger.c infra/watchdog.c infra/sha256.c
+        infra/logger.c infra/watchdog.c infra/sha256.c infra/signature_verify.c
         ntp_sync.c ota_manager.c web_server.c
         web/api_system.c web/api_ota_web.c web/api_device.c web/api_status.c
         database.c storage/config_file.c
     )
     target_link_libraries(my_test
-        -Wl,--start-group lvgl mosquitto pthread m drm rkadk cjson rga png freetype z jpeg rockit -Wl,--end-group)
+        -Wl,--start-group lvgl mosquitto pthread m drm rkadk cjson rga png freetype z jpeg rockit crypto -Wl,--end-group)
 endif()
