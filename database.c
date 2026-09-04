@@ -14,11 +14,10 @@
  */
 
 #include "database.h"
+#include "app_config.h"
 #include <sqlite3.h>
 #include <stdio.h>
 #include <string.h>
-
-#define DB_PATH "sensor_data.db"
 
 static sqlite3 *db = NULL;
 
@@ -103,12 +102,14 @@ int database_query_history(int hours, sensor_record_t *records, int max_count)
 
     time_t since = time(NULL) - hours * 3600;
 
+    /* 先取时间范围内最新的 max_count 条，再按时间升序返回，
+     * 避免长时间范围查询只拿到最早的一段数据。 */
     const char *sql =
-        "SELECT timestamp, temperature, humidity, valid "
-        "FROM sensor_data "
-        "WHERE timestamp >= ? "
-        "ORDER BY timestamp ASC "
-        "LIMIT ?;";
+        "SELECT timestamp, temperature, humidity, valid FROM ("
+        "  SELECT timestamp, temperature, humidity, valid "
+        "  FROM sensor_data WHERE timestamp >= ? "
+        "  ORDER BY timestamp DESC LIMIT ?"
+        ") ORDER BY timestamp ASC;";
 
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
@@ -194,6 +195,11 @@ int database_cleanup(int keep_days)
 
     sqlite3_exec(db, "PRAGMA optimize;", NULL, NULL, NULL);
     return 0;
+}
+
+bool database_is_ready(void)
+{
+    return db != NULL;
 }
 
 /* ==================== 通用设备数据插入 ==================== */
