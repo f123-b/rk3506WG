@@ -46,7 +46,10 @@
 #define OTA_APP_INSTALL_PATH  "/oem/my_test"               /**< App OTA: 应用安装目标路径 */
 #define OTA_APP_STOP_CMD      "killall my_test"            /**< App OTA: 停止应用命令 */
 #define OTA_APP_START_CMD     "/oem/my_test &"            /**< App OTA: 启动应用命令 */
-#define OTA_REQUIRE_SIGNATURE  1                           /**< 1=强制要求 OTA manifest 数字签名 */\n#define OTA_PUBLIC_KEY_PATH     "/oem/keys/ota_public_key.pem" /**< 设备端 RSA 公钥 PEM */\n#define OTA_SIGNATURE_ALGORITHM "RSA-PSS-SHA256"            /**< 内置验签算法 */\n#define OTA_ALLOW_SIGNED_DOWNGRADE 0                           /**< 1=允许已签名旧版本降级, 默认禁止 */
+#define OTA_REQUIRE_SIGNATURE  1                           /**< 1=强制要求 OTA manifest 数字签名 */
+#define OTA_PUBLIC_KEY_PATH     "/oem/keys/ota_public_key.pem" /**< 设备端 RSA 公钥 PEM */
+#define OTA_SIGNATURE_ALGORITHM "RSA-PSS-SHA256"            /**< 内置验签算法 */
+#define OTA_ALLOW_SIGNED_DOWNGRADE 0                           /**< 1=允许已签名旧版本降级, 默认禁止 */
 
 /* ==================== 日志配置 ==================== */
 #define LOG_FILE_PATH       "/tmp/my_test.log"  /**< 日志文件路径 (NULL=不写文件) */
