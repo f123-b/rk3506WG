@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <sys/sysinfo.h>
 
 extern void web_send_response(int client_fd, int status,
                               const char *content_type,
@@ -69,6 +70,10 @@ void api_status_handle(int client_fd)
     /* 本地版本 */
     char ver[32];
     ota_get_local_version(ver, sizeof(ver));
+
+    /* ---- 系统运行时长 ---- */
+    struct sysinfo si;
+    long uptime = (sysinfo(&si) == 0) ? si.uptime : 0;
 
     /* ---- 构建 JSON ---- */
     char json[4096];
@@ -120,7 +125,7 @@ void api_status_handle(int client_fd)
         ota_str, ota_get_progress(),
         ver, OTA_DEFAULT_SERVER,
         /* system */
-        ver, (long)time(NULL),
+        ver, uptime,
         ntp_ok ? "true" : "false");
 
     web_send_response(client_fd, 200, "application/json", json, len);
