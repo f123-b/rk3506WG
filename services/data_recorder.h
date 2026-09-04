@@ -28,6 +28,7 @@
 
 #include <stdbool.h>
 #include <time.h>
+#include "data_bus.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -55,6 +56,9 @@ int data_recorder_init(void);
  * @param valid  数据有效性
  */
 void data_recorder_record(float temp, float humi, bool valid);
+
+/** 缓冲一条 DataBus 通用设备数据；MQTT 温湿度仍使用 sensor_data 专表 */
+void data_recorder_record_data_point(const data_point_t *point);
 
 /**
  * @brief 强制将缓冲数据写入数据库 (通常在程序退出前调用)

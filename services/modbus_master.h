@@ -64,6 +64,18 @@ void modbus_master_stop(void);
 /** 获取从站数量 */
 int modbus_master_get_slave_count(void);
 
+/** 运行时启用/暂停自动轮询，线程保持存活 */
+void modbus_master_set_polling(bool enabled);
+
+/** 获取当前自动轮询状态 */
+bool modbus_master_is_polling(void);
+
+/** 获取轮询请求发送次数 */
+int modbus_master_get_tx_count(void);
+
+/** 获取成功响应次数 */
+int modbus_master_get_rx_count(void);
+
 #ifdef __cplusplus
 }
 #endif

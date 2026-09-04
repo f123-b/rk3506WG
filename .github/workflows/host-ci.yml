@@ -1,0 +1,95 @@
+name: Host Simulation CI
+
+on:
+  push:
+    branches:
+      - "codex/**"
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  host-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libsdl2-dev libssl-dev openssl
+
+      - name: Configure host simulation
+        run: cmake -S . -B build_ci -DHOST_SIMULATION=ON
+
+      - name: Build host simulation
+        run: cmake --build build_ci --parallel 2
+
+      - name: Build OTA signature verifier test
+        run: |
+          gcc -std=c11 -Wall -Wextra -I. \
+            tests/test_signature_verify.c infra/signature_verify.c \
+            -lcrypto -o /tmp/test_signature_verify
+
+      - name: Compile OTA manager signature integration
+        run: |
+          gcc -std=gnu11 -Wall -Wextra -I. -c ota_manager.c -o /tmp/ota_manager.o
+
+      - name: Verify RSA-PSS OTA signature
+        run: |
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out /tmp/ota_private.pem
+          openssl pkey -in /tmp/ota_private.pem -pubout -out /tmp/ota_public.pem
+          printf 'OTA-MANIFEST-V1\nversion=9.9.9\ntype=app\nbuild_date=2026-09-04\nfilename=my_test\nsize=123\nsha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nforce_update=0\ndelta_url=\ndelta_sha256=\ndelta_size=0\nbase_version=\n' > /tmp/manifest.txt
+          openssl dgst -sha256 -sign /tmp/ota_private.pem \
+            -sigopt rsa_padding_mode:pss \
+            -sigopt rsa_pss_saltlen:digest \
+            -out /tmp/manifest.sig /tmp/manifest.txt
+          SIG_HEX="$(od -An -vtx1 /tmp/manifest.sig | tr -d ' \n')"
+          /tmp/test_signature_verify /tmp/ota_public.pem /tmp/manifest.txt "$SIG_HEX"
+
+      - name: Reject tampered OTA manifest
+        run: |
+          cp /tmp/manifest.txt /tmp/manifest_tampered.txt
+          printf 'tampered=1\n' >> /tmp/manifest_tampered.txt
+          SIG_HEX="$(od -An -vtx1 /tmp/manifest.sig | tr -d ' \n')"
+          if /tmp/test_signature_verify /tmp/ota_public.pem /tmp/manifest_tampered.txt "$SIG_HEX"; then
+            echo "ERROR: tampered manifest unexpectedly verified"
+            exit 1
+          fi
+          echo "tampered manifest correctly rejected"
+
+      - name: Verify signing tool canonical format
+        run: |
+          printf 'signed artifact payload\n' > /tmp/my_test
+          python3 tools/ota_sign_manifest.py \
+            --artifact /tmp/my_test \
+            --private-key /tmp/ota_private.pem \
+            --version 9.9.10 \
+            --type app \
+            --build-date 2026-09-04 \
+            --output /tmp/version.json
+          python3 - <<'PY'
+          import json
+          m=json.load(open('/tmp/version.json',encoding='utf-8'))
+          text=(
+              "OTA-MANIFEST-V1\n"
+              f"version={m['version']}\n"
+              f"type={m['type']}\n"
+              f"build_date={m['build_date']}\n"
+              f"filename={m['filename']}\n"
+              f"size={m['size']}\n"
+              f"sha256={m['sha256']}\n"
+              f"force_update={1 if m['force_update'] else 0}\n"
+              f"delta_url={m.get('delta_url','')}\n"
+              f"delta_sha256={m.get('delta_sha256','')}\n"
+              f"delta_size={m.get('delta_size',0)}\n"
+              f"base_version={m.get('base_version','')}\n"
+          )
+          open('/tmp/tool_manifest.txt','wb').write(text.encode())
+          open('/tmp/tool_sig_hex.txt','w').write(m['signature'])
+          PY
+          SIG_HEX="$(cat /tmp/tool_sig_hex.txt)"
+          /tmp/test_signature_verify /tmp/ota_public.pem /tmp/tool_manifest.txt "$SIG_HEX"

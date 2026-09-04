@@ -16,14 +16,20 @@
 #include <net/if.h>
 #include <linux/can.h>
 #include <linux/can/raw.h>
+#include <stdatomic.h>
 
 /* ==================== 内部状态 ==================== */
 static int can_sock = -1;
+static atomic_int can_tx_count = 0;
+static atomic_int can_rx_count = 0;
 
 /* ==================== 公开 API ==================== */
 
 int can_init(const char *ifname, int bitrate)
 {
+    atomic_store(&can_tx_count, 0);
+    atomic_store(&can_rx_count, 0);
+
     /* 1. 使用 ip 命令配置 CAN 接口 (经典 CAN 2.0, 最大兼容性)
      *    rk3576_canfd 是 CAN FD 控制器, 但默认使用经典模式兼容 USB CAN 分析仪.
      *    如需 CAN FD, 将 fd off 改为 fd on 并设置 dbitrate.
@@ -157,6 +163,7 @@ int can_read_frame(can_frame_t *frame, int timeout_ms)
     frame->can_id = raw_frame.can_id;
     frame->can_dlc = raw_frame.can_dlc;
     memcpy(frame->data, raw_frame.data, 8);
+    atomic_fetch_add(&can_rx_count, 1);
 
     return 1;
 }
@@ -176,12 +183,23 @@ int can_write_frame(const can_frame_t *frame)
         return -1;
     }
 
+    atomic_fetch_add(&can_tx_count, 1);
     return 0;
 }
 
 int can_get_fd(void)
 {
     return can_sock;
+}
+
+int can_get_tx_count(void)
+{
+    return atomic_load(&can_tx_count);
+}
+
+int can_get_rx_count(void)
+{
+    return atomic_load(&can_rx_count);
 }
 
 void can_close(void)

@@ -15,6 +15,7 @@
 #include "ota_manager.h"
 #include "app_config.h"
 #include "infra/sha256.h"
+#include "infra/signature_verify.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,8 +32,6 @@
 #include <sys/stat.h>
 
 /* ==================== 配置常量 ==================== */
-#define OTA_DEFAULT_SERVER       "http://192.168.5.10:9090"
-#define OTA_DOWNLOAD_PATH        "/tmp/my_test_new"
 #define OTA_MAX_FIRMWARE_SIZE    (16 * 1024 * 1024)  /**< 最大固件 16MB */
 #define OTA_HTTP_TIMEOUT         30                   /**< HTTP 超时 (秒) */
 #define OTA_DOWNLOAD_TIMEOUT     300                  /**< 下载超时 (秒) */
@@ -44,27 +43,13 @@
 #define OTA_HEALTH_FILE          "/tmp/ota_ok"          /**< 健康标志 */
 #define OTA_ROLLBACK_GRACE_SEC   15                     /**< 回滚宽限期 (秒) */
 
-/* 应用版本号 */
-#ifndef APP_VERSION
-#define APP_VERSION  "3.0.0"
-#endif
-
-/* App 模式默认配置 */
-#ifndef OTA_APP_INSTALL_PATH
-#define OTA_APP_INSTALL_PATH  "/oem/my_test"
-#endif
-#ifndef OTA_APP_STOP_CMD
-#define OTA_APP_STOP_CMD      "killall my_test"
-#endif
-#ifndef OTA_APP_START_CMD
-#define OTA_APP_START_CMD     "/oem/my_test &"
-#endif
-
 /* ==================== 内部状态 ==================== */
 static char  ota_server_url[256] = OTA_DEFAULT_SERVER;
 static ota_version_info_t ota_remote_info;
 static ota_progress_cb    ota_progress_callback = NULL;
 static ota_signature_verify_cb ota_signature_callback = NULL;
+static ota_firmware_apply_cb ota_firmware_apply_callback = NULL;
+static char ota_public_key_path[256] = OTA_PUBLIC_KEY_PATH;
 
 static ota_status_t ota_state = OTA_IDLE;
 static ota_error_t  ota_last_error  = OTA_ERR_NONE;
@@ -203,6 +188,107 @@ static bool json_get_bool(const char *json, const char *key, bool default_val)
 
     if (strncmp(p, "true", 4) == 0) return true;
     return false;
+}
+
+/* ==================== OTA manifest 数字签名 ==================== */
+
+/**
+ * 规范化签名原文。服务端签名脚本必须使用完全相同的字段顺序和换行格式。
+ * 签名覆盖所有会影响升级决策与最终制品身份的关键字段。
+ */
+static int ota_build_signed_manifest(const ota_version_info_t *info,
+                                     char *out, size_t out_size)
+{
+    if (!info || !out || out_size == 0) return -1;
+
+    int n = snprintf(out, out_size,
+        "OTA-MANIFEST-V1\n"
+        "version=%s\n"
+        "type=%s\n"
+        "build_date=%s\n"
+        "filename=%s\n"
+        "size=%lld\n"
+        "sha256=%s\n"
+        "force_update=%d\n"
+        "delta_url=%s\n"
+        "delta_sha256=%s\n"
+        "delta_size=%lld\n"
+        "base_version=%s\n",
+        info->version,
+        info->update_type,
+        info->build_date,
+        info->filename,
+        (long long)info->size,
+        info->sha256,
+        info->force_update ? 1 : 0,
+        info->delta_url,
+        info->delta_sha256,
+        (long long)info->delta_size,
+        info->base_version);
+
+    return (n > 0 && (size_t)n < out_size) ? n : -1;
+}
+
+static bool ota_verify_manifest_signature(const ota_version_info_t *info)
+{
+    if (!info) return false;
+
+    if (!info->signature[0]) {
+        if (OTA_REQUIRE_SIGNATURE) {
+            set_error(OTA_ERR_SIGNATURE, "Signed OTA manifest is required");
+            return false;
+        }
+        printf("OTA: unsigned manifest accepted by policy\n");
+        return true;
+    }
+
+    if (strcmp(info->signature_algorithm, OTA_SIGNATURE_ALGORITHM) != 0) {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "Unsupported signature algorithm: %s",
+                 info->signature_algorithm[0] ? info->signature_algorithm : "(missing)");
+        set_error(OTA_ERR_SIGNATURE, msg);
+        return false;
+    }
+
+    char manifest[4096];
+    int manifest_len = ota_build_signed_manifest(info, manifest, sizeof(manifest));
+    if (manifest_len <= 0) {
+        set_error(OTA_ERR_SIGNATURE, "Cannot canonicalize OTA manifest");
+        return false;
+    }
+
+    if (ota_progress_callback)
+        ota_progress_callback(10, "Verifying signed manifest...");
+
+    bool ok = false;
+    if (ota_signature_callback) {
+        ok = ota_signature_callback((const uint8_t *)manifest,
+                                    (size_t)manifest_len,
+                                    info->signature);
+    } else {
+        char verify_err[256] = {0};
+        ok = signature_verify_rsa_pss_sha256(
+            (const uint8_t *)manifest,
+            (size_t)manifest_len,
+            info->signature,
+            ota_public_key_path,
+            verify_err,
+            sizeof(verify_err));
+
+        if (!ok) {
+            fprintf(stderr, "OTA: manifest signature verification failed: %s\n",
+                    verify_err[0] ? verify_err : "unknown");
+        }
+    }
+
+    if (!ok) {
+        set_error(OTA_ERR_SIGNATURE, "OTA manifest signature verification failed");
+        return false;
+    }
+
+    printf("OTA: signed manifest verified OK (%s, key=%s)\n",
+           OTA_SIGNATURE_ALGORITHM, ota_public_key_path);
+    return true;
 }
 
 /* ==================== HTTP 客户端 ==================== */
@@ -510,6 +596,9 @@ void ota_init(const char *ota_server)
     printf("OTA: server = %s, local version = %s, type = %s\n",
            ota_server_url, APP_VERSION,
            (ota_type == OTA_TYPE_APP) ? "app" : "firmware");
+    printf("OTA: signature policy=%s, algorithm=%s, public_key=%s\n",
+           OTA_REQUIRE_SIGNATURE ? "required" : "optional",
+           OTA_SIGNATURE_ALGORITHM, ota_public_key_path);
 }
 
 void ota_set_type(ota_type_t type)
@@ -543,7 +632,22 @@ void ota_set_progress_callback(ota_progress_cb cb)
 void ota_set_signature_verify_callback(ota_signature_verify_cb cb)
 {
     ota_signature_callback = cb;
-    printf("OTA: signature verify %s\n", cb ? "enabled" : "disabled");
+    printf("OTA: signature verifier = %s\n",
+           cb ? "custom callback" : "built-in RSA-PSS/SHA-256");
+}
+
+void ota_set_public_key_path(const char *path)
+{
+    const char *src = (path && path[0]) ? path : OTA_PUBLIC_KEY_PATH;
+    strncpy(ota_public_key_path, src, sizeof(ota_public_key_path) - 1);
+    ota_public_key_path[sizeof(ota_public_key_path) - 1] = '\0';
+    printf("OTA: public key path = %s\n", ota_public_key_path);
+}
+
+void ota_set_firmware_apply_callback(ota_firmware_apply_cb cb)
+{
+    ota_firmware_apply_callback = cb;
+    printf("OTA: firmware apply backend %s\n", cb ? "configured" : "not configured");
 }
 
 /**
@@ -780,6 +884,8 @@ bool ota_check_update(ota_version_info_t *info)
     json_get_string(resp, "sha256",      info->sha256, sizeof(info->sha256));
     json_get_string(resp, "changelog",   info->changelog, sizeof(info->changelog));
     json_get_string(resp, "signature",   info->signature, sizeof(info->signature));
+    json_get_string(resp, "signature_alg", info->signature_algorithm,
+                    sizeof(info->signature_algorithm));
     info->size         = json_get_int(resp, "size", 0);
     info->force_update = json_get_bool(resp, "force_update", false);
 
@@ -799,11 +905,22 @@ bool ota_check_update(ota_version_info_t *info)
            (long long)info->size, info->has_delta);
 
     if (info->signature[0]) {
-        printf("OTA: firmware signature present (%zu chars)\n",
-               strlen(info->signature));
+        printf("OTA: signed manifest present (%zu hex chars, alg=%s)\n",
+               strlen(info->signature), info->signature_algorithm);
     }
 
-    /* 根据 version.json 中的 type 自动切换 OTA 模式 */
+    /*
+     * 在信任 type / force_update / sha256 / delta 等元数据之前先验签。
+     * 验签失败时整个更新检查直接失败，后续不会下载或应用任何制品。
+     */
+    if (!ota_verify_manifest_signature(info)) {
+        pthread_mutex_lock(&ota_mutex);
+        ota_state = OTA_FAILED;
+        pthread_mutex_unlock(&ota_mutex);
+        return false;
+    }
+
+    /* 根据已经验签的 type 自动切换 OTA 模式 */
     if (strcmp(info->update_type, "app") == 0) {
         ota_type = OTA_TYPE_APP;
         printf("OTA: auto-detected app update mode\n");
@@ -815,8 +932,17 @@ bool ota_check_update(ota_version_info_t *info)
     /* 保存远程信息 */
     memcpy(&ota_remote_info, info, sizeof(ota_remote_info));
 
-    /* 版本比较 */
-    if (version_compare(info->version, APP_VERSION) <= 0 && !info->force_update) {
+    /* 版本比较 / 防重放降级 */
+    int version_cmp = version_compare(info->version, APP_VERSION);
+    if (version_cmp < 0 && !(info->force_update && OTA_ALLOW_SIGNED_DOWNGRADE)) {
+        pthread_mutex_lock(&ota_mutex);
+        ota_state = OTA_IDLE;
+        set_error(OTA_ERR_VERSION, "Signed downgrade is blocked by policy");
+        pthread_mutex_unlock(&ota_mutex);
+        return false;
+    }
+
+    if (version_cmp == 0 && !info->force_update) {
         pthread_mutex_lock(&ota_mutex);
         ota_state = OTA_IDLE;
         set_error(OTA_ERR_NO_UPDATE, "Already latest version");
@@ -1019,22 +1145,13 @@ verify_stage:
 
     printf("OTA: SHA256 verified OK\n");
 
-    /* ===== 阶段2.5: 签名验证 (可选, 通过回调) ===== */
-    if (ota_signature_callback && ota_remote_info.signature[0]) {
-        if (ota_progress_callback)
-            ota_progress_callback(96, "Verifying signature...");
+    /*
+     * manifest 数字签名已在 ota_check_update() 中通过验证。
+     * 此处 SHA256 把下载制品绑定到已签名的 sha256/delta_sha256 字段；
+     * 差分模式在应用补丁后还会再次校验最终完整文件 SHA256。
+     */
 
-        printf("OTA: verifying firmware signature...\n");
-        if (!ota_signature_callback(dl_path, ota_remote_info.signature)) {
-            set_error(OTA_ERR_SIGNATURE, "Signature verification failed");
-            ota_state = OTA_FAILED;
-            unlink(dl_path);
-            return false;
-        }
-        printf("OTA: signature verified OK\n");
-    }
-
-    /* ===== 阶段2.6: 差分补丁应用 ===== */
+    /* ===== 阶段2.5: 差分补丁应用 ===== */
     if (use_delta) {
         if (ota_apply_delta_patch() != 0) {
             ota_state = OTA_FAILED;
@@ -1067,14 +1184,26 @@ verify_stage:
         return true;
     }
 
-    /* Firmware 模式: 下载完成, 等待用户手动触发固件烧写 */
-    if (ota_progress_callback)
-        ota_progress_callback(99, "Firmware downloaded, ready to flash");
+    /* Firmware 模式必须由 BSP/产品层提供安全的分区写入实现。
+     * 未配置后端时不能把“仅下载成功”错误上报成 OTA_SUCCESS。 */
+    if (!ota_firmware_apply_callback) {
+        set_error(OTA_ERR_WRITE, "Firmware apply backend is not configured");
+        pthread_mutex_lock(&ota_mutex);
+        ota_state = OTA_FAILED;
+        pthread_mutex_unlock(&ota_mutex);
+        return false;
+    }
 
-    printf("OTA (firmware): image ready at %s\n", OTA_DOWNLOAD_PATH);
-    printf("OTA (firmware): SHA256 verified, manual flash required\n");
-    printf("OTA (firmware): To flash: dd if=%s of=<flash_partition> bs=4M\n",
-           OTA_DOWNLOAD_PATH);
+    if (ota_progress_callback)
+        ota_progress_callback(99, "Applying firmware image...");
+
+    if (!ota_firmware_apply_callback(OTA_DOWNLOAD_PATH)) {
+        set_error(OTA_ERR_WRITE, "Firmware apply backend failed");
+        pthread_mutex_lock(&ota_mutex);
+        ota_state = OTA_FAILED;
+        pthread_mutex_unlock(&ota_mutex);
+        return false;
+    }
 
     pthread_mutex_lock(&ota_mutex);
     ota_state = OTA_SUCCESS;
@@ -1082,7 +1211,7 @@ verify_stage:
     pthread_mutex_unlock(&ota_mutex);
 
     if (ota_progress_callback)
-        ota_progress_callback(100, "Firmware ready, waiting for flash");
+        ota_progress_callback(100, "Firmware applied successfully");
 
     return true;
 }

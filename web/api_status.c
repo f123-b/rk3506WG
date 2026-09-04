@@ -16,20 +16,18 @@
 #include "../app_config.h"
 #include "../services/mqtt_client.h"
 #include "../services/data_bus.h"
+#include "../services/modbus_master.h"
+#include "../hal/can_socket.h"
 #include "../ota_manager.h"
 #include "../ntp_sync.h"
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <sys/sysinfo.h>
 
 extern void web_send_response(int client_fd, int status,
                               const char *content_type,
                               const char *body, size_t body_len);
-
-/* 外部全局变量: main.c 中的 CAN / Modbus 计数器 */
-extern int can_tx_cnt;
-extern int can_rx_cnt;
-extern int rs485_tx_cnt;
 
 void api_status_handle(int client_fd)
 {
@@ -69,6 +67,10 @@ void api_status_handle(int client_fd)
     /* 本地版本 */
     char ver[32];
     ota_get_local_version(ver, sizeof(ver));
+
+    /* ---- 系统运行时长 ---- */
+    struct sysinfo si;
+    long uptime = (sysinfo(&si) == 0) ? si.uptime : 0;
 
     /* ---- 构建 JSON ---- */
     char json[4096];
@@ -111,16 +113,16 @@ void api_status_handle(int client_fd)
         /* modbus */
         modbus_count > 0 ? "true" : "false",
         modbus_count,
-        rs485_tx_cnt,
+        modbus_master_get_tx_count(),
         /* can */
         can_count > 0 ? "true" : "false",
         can_count,
-        can_tx_cnt, can_rx_cnt,
+        can_get_tx_count(), can_get_rx_count(),
         /* ota */
         ota_str, ota_get_progress(),
         ver, OTA_DEFAULT_SERVER,
         /* system */
-        ver, (long)time(NULL),
+        ver, uptime,
         ntp_ok ? "true" : "false");
 
     web_send_response(client_fd, 200, "application/json", json, len);

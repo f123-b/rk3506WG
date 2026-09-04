@@ -53,6 +53,12 @@ int mqtt_client_init(const char *broker, int port, const char *topic,
     return 0;
 }
 
+void mqtt_client_set_auth(const char *id, const char *secret)
+{
+    (void)id;
+    (void)secret;
+}
+
 int mqtt_client_start(void) { return 0; }
 bool mqtt_client_is_connected(void) { return g_connected; }
 int  mqtt_client_get_retry_count(void) { return 0; }

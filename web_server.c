@@ -23,6 +23,7 @@
 #include "ntp_sync.h"
 #include "app_config.h"
 #include "infra/logger.h"
+#include "database.h"
 
 /* 内部常量 */
 #define HTTP_MAX_REQUEST_SIZE   4096
@@ -39,6 +40,7 @@
 #include <errno.h>
 #include <time.h>
 #include <fcntl.h>
+#include <stdatomic.h>
 
 /* ==================== 共享数据 (MQTT 回调→HTTP 线程) ==================== */
 static pthread_mutex_t data_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -48,7 +50,7 @@ static bool  shared_valid = false;
 static time_t shared_last_update = 0;
 
 static int  server_fd = -1;
-static bool server_running = false;
+static atomic_bool atomic_store(&server_running, false);
 static pthread_t server_thread;
 
 /* ==================== 辅助函数 ==================== */
@@ -105,19 +107,27 @@ static void handle_api_current(int client_fd)
 {
     char json[512];
     char time_str[32];
-    struct tm *tm_info;
-    time_t now = shared_last_update > 0 ? shared_last_update : time(NULL);
 
-    tm_info = localtime(&now);
-    strftime(time_str, sizeof(time_str), "%H:%M:%S", tm_info);
+    float temp;
+    float humi;
+    bool valid;
+    time_t last_update;
 
     pthread_mutex_lock(&data_mutex);
+    temp = shared_temp;
+    humi = shared_humi;
+    valid = shared_valid;
+    last_update = shared_last_update;
+    pthread_mutex_unlock(&data_mutex);
+
+    time_t now = last_update > 0 ? last_update : time(NULL);
+    struct tm tm_buf;
+    localtime_r(&now, &tm_buf);
+    strftime(time_str, sizeof(time_str), "%H:%M:%S", &tm_buf);
+
     int len = snprintf(json, sizeof(json),
         "{\"temperature\":%.1f,\"humidity\":%.1f,\"valid\":%s,\"time\":\"%s\"}",
-        shared_temp, shared_humi,
-        shared_valid ? "true" : "false",
-        time_str);
-    pthread_mutex_unlock(&data_mutex);
+        temp, humi, valid ? "true" : "false", time_str);
 
     web_send_response(client_fd, 200, "application/json", json, len);
 }
@@ -125,42 +135,49 @@ static void handle_api_current(int client_fd)
 /** GET /api/sensor/history?hours=N */
 static void handle_api_history(int client_fd, int hours)
 {
+    /* 64 KiB 响应缓冲下限制为 512 条，保证 JSON 不越界。
+     * database_query_history() 返回时间范围内最新的 N 条并按时间升序排列。 */
+    enum { MAX_HISTORY_RECORDS = 512 };
+    sensor_record_t records[MAX_HISTORY_RECORDS];
+    int count = database_query_history(hours, records, MAX_HISTORY_RECORDS);
+
     char json[HTTP_MAX_RESPONSE_SIZE];
     char *p = json;
-    int remaining = sizeof(json) - 1;
-    int written;
+    size_t remaining = sizeof(json);
 
-    written = snprintf(p, remaining, "[");
-    p += written; remaining -= written;
+    int w = snprintf(p, remaining, "[");
+    if (w < 0 || (size_t)w >= remaining) return;
+    p += w; remaining -= (size_t)w;
 
-    time_t now = time(NULL);
-    int points = hours > 24 ? 48 : 24;
-    int interval_sec = (hours * 3600) / points;
+    for (int i = 0; i < count; i++) {
+        char time_buf[32];
+        struct tm tm_buf;
+        localtime_r(&records[i].timestamp, &tm_buf);
+        strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &tm_buf);
 
-    for (int i = 0; i < points; i++) {
-        time_t t = now - (points - i) * interval_sec;
-        char time_buf[16];
-        struct tm *tm_info = localtime(&t);
-        strftime(time_buf, sizeof(time_buf), "%H:%M", tm_info);
+        w = snprintf(p, remaining,
+            "%s{\"timestamp\":%ld,\"time\":\"%s\",\"temperature\":%.1f,"
+            "\"humidity\":%.1f,\"valid\":%s}",
+            i > 0 ? "," : "",
+            (long)records[i].timestamp, time_buf,
+            records[i].temperature, records[i].humidity,
+            records[i].valid ? "true" : "false");
 
-        pthread_mutex_lock(&data_mutex);
-        float t_val = shared_temp + (rand() % 30 - 15) / 10.0f;
-        float h_val = shared_humi + (rand() % 60 - 30) / 10.0f;
-        pthread_mutex_unlock(&data_mutex);
-
-        if (t_val < 0) t_val = 0;
-        if (h_val < 0) h_val = 0;
-
-        written = snprintf(p, remaining,
-            "%s{\"time\":\"%s\",\"temperature\":%.1f,\"humidity\":%.1f}",
-            i > 0 ? "," : "", time_buf, t_val, h_val);
-        p += written; remaining -= written;
+        if (w < 0 || (size_t)w >= remaining) break;
+        p += w;
+        remaining -= (size_t)w;
     }
 
-    written = snprintf(p, remaining, "]");
-    p += written;
+    if (remaining > 1) {
+        *p++ = ']';
+        *p = '\0';
+    } else {
+        json[sizeof(json) - 2] = ']';
+        json[sizeof(json) - 1] = '\0';
+        p = json + sizeof(json) - 1;
+    }
 
-    web_send_response(client_fd, 200, "application/json", json, p - json);
+    web_send_response(client_fd, 200, "application/json", json, (size_t)(p - json));
 }
 
 /* ==================== 静态文件服务 ==================== */
@@ -315,7 +332,7 @@ static void *server_loop(void *arg)
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
         LOG_ERROR("HTTP socket: %s", strerror(errno));
-        server_running = false;
+        atomic_store(&server_running, false);
         return NULL;
     }
 
@@ -329,19 +346,19 @@ static void *server_loop(void *arg)
     if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         LOG_ERROR("HTTP bind: %s", strerror(errno));
         close(server_fd);
-        server_running = false;
+        atomic_store(&server_running, false);
         return NULL;
     }
 
     if (listen(server_fd, HTTP_MAX_CLIENTS) < 0) {
         LOG_ERROR("HTTP listen: %s", strerror(errno));
         close(server_fd);
-        server_running = false;
+        atomic_store(&server_running, false);
         return NULL;
     }
 
     LOG_INFO("HTTP server on port %d", port);
-    server_running = true;
+    atomic_store(&server_running, true);
 
     while (server_running) {
         struct sockaddr_in client_addr;
@@ -369,23 +386,23 @@ static void *server_loop(void *arg)
 
 int web_server_start(int port)
 {
-    if (server_running) return 0;
+    if (atomic_load(&server_running)) return 0;
 
     if (pthread_create(&server_thread, NULL, server_loop,
                        (void *)(intptr_t)port) != 0) {
         return -1;
     }
 
-    for (int i = 0; i < 50 && !server_running; i++) {
+    for (int i = 0; i < 50 && !atomic_load(&server_running); i++) {
         usleep(100000);
     }
 
-    return server_running ? 0 : -1;
+    return atomic_load(&server_running) ? 0 : -1;
 }
 
 void web_server_stop(void)
 {
-    server_running = false;
+    atomic_store(&server_running, false);
     if (server_fd >= 0) {
         shutdown(server_fd, SHUT_RDWR);
         close(server_fd);
@@ -405,5 +422,5 @@ void web_server_update_data(float temp, float humi, bool valid)
 
 bool web_server_is_running(void)
 {
-    return server_running;
+    return atomic_load(&server_running);
 }

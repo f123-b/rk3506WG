@@ -13,6 +13,7 @@
  */
 
 #include "ntp_sync.h"
+#include "app_config.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,9 +25,9 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <errno.h>
+#include <stdatomic.h>
 
 /* ==================== 配置 ==================== */
-#define NTP_SYNC_INTERVAL  3600          /**< 校准间隔 (秒), 1小时 */
 #define NTP_PORT           123           /**< NTP 标准端口 */
 #define NTP_PACKET_SIZE    48            /**< NTP 请求/响应包大小 */
 #define NTP_TIMEOUT_SEC    5             /**< 单个服务器超时 (秒) */
@@ -43,7 +44,8 @@ static const char *ntp_servers[] = {
 
 /* ==================== 状态 ==================== */
 static pthread_t sync_thread;
-static bool thread_running = false;
+static atomic_bool thread_running = false;
+static bool thread_created = false;
 static bool ntp_synced = false;
 static time_t last_sync_time = 0;
 static pthread_mutex_t status_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -209,7 +211,7 @@ static void *ntp_sync_thread_func(void *arg)
     /* 周期性校准循环 */
     while (thread_running) {
         /* 睡眠 NTP_SYNC_INTERVAL 秒，但每 5 秒检查一次退出标志 */
-        for (int i = 0; i < NTP_SYNC_INTERVAL / 5 && thread_running; i++) {
+        for (int i = 0; i < NTP_SYNC_INTERVAL / 5 && atomic_load(&thread_running); i++) {
             sleep(5);
         }
         if (!thread_running) break;
@@ -231,22 +233,26 @@ static void *ntp_sync_thread_func(void *arg)
 
 int ntp_sync_init(void)
 {
-    if (thread_running) return 0;
+    if (atomic_load(&thread_running)) return 0;
 
-    thread_running = true;
+    atomic_store(&thread_running, true);
     if (pthread_create(&sync_thread, NULL, ntp_sync_thread_func, NULL) != 0) {
-        thread_running = false;
+        atomic_store(&thread_running, false);
         perror("NTP pthread_create");
         return -1;
     }
+    thread_created = true;
     printf("NTP: sync thread started\n");
     return 0;
 }
 
 void ntp_sync_stop(void)
 {
-    thread_running = false;
-    pthread_join(sync_thread, NULL);
+    atomic_store(&thread_running, false);
+    if (thread_created) {
+        pthread_join(sync_thread, NULL);
+        thread_created = false;
+    }
     printf("NTP: sync thread stopped\n");
 }
 

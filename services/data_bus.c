@@ -49,12 +49,20 @@ void data_bus_publish(const data_point_t *point)
 {
     if (!point) return;
 
+    /* 回调列表与数据点都在锁内做快照，回调本身在解锁后执行。
+     * 这样订阅者可以安全调用 DataBus API，也不会因慢 I/O 长时间占用总线锁。 */
+    data_bus_callback_t callbacks[MAX_SUBSCRIBERS];
+    void *callback_user_data[MAX_SUBSCRIBERS];
+    int callback_count = 0;
+    data_point_t updated_copy;
+
     pthread_mutex_lock(&bus_mutex);
 
-    /* 查找是否已存在 (按 device_name + point_name 匹配) */
+    /* source + device_name + point_name 共同定义一个数据点，避免不同协议同名设备冲突 */
     int idx = -1;
     for (int i = 0; i < point_count; i++) {
-        if (strcmp(points[i].device_name, point->device_name) == 0 &&
+        if (points[i].source == point->source &&
+            strcmp(points[i].device_name, point->device_name) == 0 &&
             strcmp(points[i].point_name, point->point_name) == 0) {
             idx = i;
             break;
@@ -62,14 +70,12 @@ void data_bus_publish(const data_point_t *point)
     }
 
     if (idx >= 0) {
-        /* 更新已有数据点 */
         points[idx].value = point->value;
         points[idx].valid = point->valid;
         points[idx].timestamp = point->timestamp;
-        points[idx].source = point->source;
         strncpy(points[idx].unit, point->unit, sizeof(points[idx].unit) - 1);
+        points[idx].unit[sizeof(points[idx].unit) - 1] = '\0';
     } else if (point_count < DATA_BUS_MAX_POINTS) {
-        /* 新增数据点 */
         idx = point_count;
         memcpy(&points[idx], point, sizeof(data_point_t));
         points[idx].id = (uint32_t)idx;
@@ -81,16 +87,20 @@ void data_bus_publish(const data_point_t *point)
         return;
     }
 
-    /* 通知所有订阅者 */
-    data_point_t *updated = &points[idx];
-    for (int i = 0; i < subscriber_count; i++) {
+    updated_copy = points[idx];
+    for (int i = 0; i < subscriber_count && callback_count < MAX_SUBSCRIBERS; i++) {
         if (subscribers[i].active && subscribers[i].callback) {
-            /* 回调在锁内执行, 订阅者应尽快返回 */
-            subscribers[i].callback(updated, subscribers[i].user_data);
+            callbacks[callback_count] = subscribers[i].callback;
+            callback_user_data[callback_count] = subscribers[i].user_data;
+            callback_count++;
         }
     }
 
     pthread_mutex_unlock(&bus_mutex);
+
+    for (int i = 0; i < callback_count; i++) {
+        callbacks[i](&updated_copy, callback_user_data[i]);
+    }
 }
 
 int data_bus_subscribe(data_bus_callback_t cb, void *user_data)

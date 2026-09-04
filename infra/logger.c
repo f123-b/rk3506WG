@@ -12,6 +12,7 @@
 
 static FILE *log_fp = NULL;
 static char  log_path[256] = {0};
+static int   log_level = 3;
 static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 void logger_init(const char *log_file)
@@ -35,6 +36,15 @@ void logger_init(const char *log_file)
     pthread_mutex_unlock(&log_mutex);
 }
 
+void logger_set_level(int level)
+{
+    if (level < 0) level = 0;
+    if (level > 3) level = 3;
+    pthread_mutex_lock(&log_mutex);
+    log_level = level;
+    pthread_mutex_unlock(&log_mutex);
+}
+
 void logger_close(void)
 {
     pthread_mutex_lock(&log_mutex);
@@ -54,6 +64,20 @@ const char *logger_get_path(void)
 void logger_write(char level, const char *file, int line,
                   const char *fmt, ...)
 {
+    int msg_level;
+    switch (level) {
+        case 'E': msg_level = 0; break;
+        case 'W': msg_level = 1; break;
+        case 'I': msg_level = 2; break;
+        case 'D': msg_level = 3; break;
+        default:  msg_level = 3; break;
+    }
+
+    pthread_mutex_lock(&log_mutex);
+    int current_level = log_level;
+    pthread_mutex_unlock(&log_mutex);
+    if (msg_level > current_level) return;
+
     /* 获取时间戳 */
     time_t now = time(NULL);
     struct tm tm_buf;

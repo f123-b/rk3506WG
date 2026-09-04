@@ -14,11 +14,10 @@
  */
 
 #include "database.h"
+#include "app_config.h"
 #include <sqlite3.h>
 #include <stdio.h>
 #include <string.h>
-
-#define DB_PATH "sensor_data.db"
 
 static sqlite3 *db = NULL;
 
@@ -103,12 +102,14 @@ int database_query_history(int hours, sensor_record_t *records, int max_count)
 
     time_t since = time(NULL) - hours * 3600;
 
+    /* 先取时间范围内最新的 max_count 条，再按时间升序返回，
+     * 避免长时间范围查询只拿到最早的一段数据。 */
     const char *sql =
-        "SELECT timestamp, temperature, humidity, valid "
-        "FROM sensor_data "
-        "WHERE timestamp >= ? "
-        "ORDER BY timestamp ASC "
-        "LIMIT ?;";
+        "SELECT timestamp, temperature, humidity, valid FROM ("
+        "  SELECT timestamp, temperature, humidity, valid "
+        "  FROM sensor_data WHERE timestamp >= ? "
+        "  ORDER BY timestamp DESC LIMIT ?"
+        ") ORDER BY timestamp ASC;";
 
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
@@ -196,10 +197,15 @@ int database_cleanup(int keep_days)
     return 0;
 }
 
+bool database_is_ready(void)
+{
+    return db != NULL;
+}
+
 /* ==================== 通用设备数据插入 ==================== */
-int database_insert_device_data(const char *source, const char *device,
-                                 const char *point_name, double value,
-                                 const char *unit, bool valid)
+int database_insert_device_data_at(time_t timestamp, const char *source,
+                                    const char *device, const char *point_name,
+                                    double value, const char *unit, bool valid)
 {
     if (!db) return -1;
 
@@ -212,7 +218,7 @@ int database_insert_device_data(const char *source, const char *device,
         return -1;
     }
 
-    sqlite3_bind_int64(stmt, 1, (sqlite3_int64)time(NULL));
+    sqlite3_bind_int64(stmt, 1, (sqlite3_int64)timestamp);
     sqlite3_bind_text(stmt, 2, source, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 3, device, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 4, point_name, -1, SQLITE_TRANSIENT);
@@ -222,8 +228,15 @@ int database_insert_device_data(const char *source, const char *device,
 
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
-
     return rc == SQLITE_DONE ? 0 : -1;
+}
+
+int database_insert_device_data(const char *source, const char *device,
+                                 const char *point_name, double value,
+                                 const char *unit, bool valid)
+{
+    return database_insert_device_data_at(time(NULL), source, device,
+                                          point_name, value, unit, valid);
 }
 
 /* ==================== 关闭数据库 ==================== */

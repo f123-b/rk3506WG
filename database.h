@@ -78,6 +78,9 @@ int database_get_stats(int hours, sensor_stats_t *stats);
  */
 int database_cleanup(int keep_days);
 
+/** 数据库当前是否已经成功打开 */
+bool database_is_ready(void);
+
 /**
  * @brief 插入一条通用设备数据记录
  * @param source    数据来源 (如 "modbus", "can")
@@ -91,6 +94,11 @@ int database_cleanup(int keep_days);
 int database_insert_device_data(const char *source, const char *device,
                                  const char *point_name, double value,
                                  const char *unit, bool valid);
+
+/** 按指定采样时间写入通用设备数据，供 RAM 批量缓存刷新使用 */
+int database_insert_device_data_at(time_t timestamp, const char *source,
+                                    const char *device, const char *point_name,
+                                    double value, const char *unit, bool valid);
 
 /**
  * @brief 关闭数据库

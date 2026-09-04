@@ -39,12 +39,19 @@ extern "C" {
 
 /* ==================== 配置结构 ==================== */
 
+/** CAN 信号字节序 */
+typedef enum {
+    CAN_BYTE_ORDER_INTEL = 0,     /**< Intel / little-endian, start_bit 为 LSB 索引 */
+    CAN_BYTE_ORDER_MOTOROLA = 1,  /**< Motorola / DBC big-endian, start_bit 为 MSB 索引 */
+} can_byte_order_t;
+
 /** CAN 信号映射配置 */
 typedef struct {
     uint32_t can_id;        /**< CAN ID (标准帧 11bit, 扩展帧用 bit31=1 标记) */
     char     signal_name[32]; /**< 信号名称 (如 "发动机转速") */
-    uint8_t  start_bit;     /**< 起始位 (0-63, Motorola 格式) */
+    uint8_t  start_bit;     /**< Intel: LSB起始位; Motorola: DBC MSB起始位 */
     uint8_t  length;        /**< 数据长度 (bit, 1-32) */
+    can_byte_order_t byte_order; /**< Intel/Motorola，零初始化默认 Intel */
     float    scale;         /**< 缩放系数 (物理值 = raw * scale + offset) */
     float    offset;        /**< 偏移量 */
     char     unit[16];      /**< 单位 (如 "rpm", "℃", "kPa") */

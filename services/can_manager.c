@@ -13,6 +13,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <time.h>
+#include <stdatomic.h>
 
 /* ==================== 配置 ==================== */
 #define MAX_SIGNALS  32   /**< 最大信号配置数 */
@@ -23,7 +24,7 @@ static int signal_count = 0;
 static can_data_callback_t user_cb = NULL;
 static can_raw_frame_callback_t raw_cb = NULL;
 static pthread_t recv_thread;
-static bool running = false;
+static atomic_bool running = false;
 static char if_name[16];
 
 /* ==================== CAN 帧解析 ==================== */
@@ -31,31 +32,48 @@ static char if_name[16];
 /**
  * @brief 从 CAN 帧数据中提取指定位置和长度的信号值
  *
- * 支持 Intel (little-endian) 和 Motorola (big-endian) 两种字节序。
- * 简化实现: 假设 Intel 格式 (LSB first), 信号不跨字节边界。
+ * 支持 Intel (little-endian) 和 Motorola/DBC (big-endian) 两种字节序，
+ * 两种模式均支持跨字节信号。
  *
  * @param data       CAN 帧 8 字节数据
  * @param start_bit  起始位
  * @param length     位长度
  * @return 提取的原始值
  */
-static uint64_t extract_signal(const uint8_t *data, uint8_t start_bit,
-                                uint8_t length)
+static bool extract_signal(const uint8_t *data, uint8_t dlc,
+                           uint8_t start_bit, uint8_t length,
+                           can_byte_order_t byte_order, uint64_t *out)
 {
+    if (!data || !out || length == 0 || length > 64) return false;
+
     uint64_t raw = 0;
 
-    /* 逐位提取 (简单实现, 生产代码应优化) */
-    for (int i = 0; i < length; i++) {
-        int bit_pos = start_bit + i;
-        int byte_idx = bit_pos / 8;
-        int bit_idx = bit_pos % 8;
+    if (byte_order == CAN_BYTE_ORDER_INTEL) {
+        for (uint8_t i = 0; i < length; i++) {
+            int bit_pos = (int)start_bit + i;
+            int byte_idx = bit_pos / 8;
+            int bit_idx = bit_pos % 8;
+            if (byte_idx >= dlc) return false;
+            if (data[byte_idx] & (1u << bit_idx)) {
+                raw |= (1ULL << i);
+            }
+        }
+    } else {
+        /* DBC Motorola saw-tooth: 同一字节 bit7→bit0，跨字节后跳到下一字节 bit7 */
+        int bit_pos = start_bit;
+        for (uint8_t i = 0; i < length; i++) {
+            if (bit_pos < 0) return false;
+            int byte_idx = bit_pos / 8;
+            int bit_idx = bit_pos % 8;
+            if (byte_idx >= dlc) return false;
 
-        if (byte_idx < 8 && (data[byte_idx] & (1 << bit_idx))) {
-            raw |= (1ULL << i);
+            raw = (raw << 1) | ((data[byte_idx] >> bit_idx) & 0x1u);
+            bit_pos = (bit_idx == 0) ? (bit_pos + 15) : (bit_pos - 1);
         }
     }
 
-    return raw;
+    *out = raw;
+    return true;
 }
 
 /* ==================== 接收线程 ==================== */
@@ -67,30 +85,37 @@ static void *can_recv_thread_func(void *arg)
 
     LOG_INFO("CAN: receiver thread started, %d signals", signal_count);
 
-    while (running) {
+    while (atomic_load(&running)) {
         int rc = can_read_frame(&frame, 1000);  /* 1秒超时, 便于退出检查 */
         if (rc <= 0) continue;
 
-        /* 原始帧回调 (每条帧触发一次, 不等信号匹配) */
+        bool frame_extended = (frame.can_id & CAN_EFF_FLAG) != 0;
+        uint32_t frame_id = frame.can_id &
+            (frame_extended ? CAN_EFF_MASK : CAN_SFF_MASK);
+        uint32_t callback_id = frame_id |
+            (frame_extended ? CAN_EFF_FLAG : 0);
+
         if (raw_cb) {
-            raw_cb(frame.can_id & CAN_SFF_MASK, frame.can_dlc, frame.data);
+            raw_cb(callback_id, frame.can_dlc, frame.data);
         }
 
-        /* 遍历信号配置表, 匹配 CAN ID */
         for (int i = 0; i < signal_count; i++) {
             can_signal_config_t *sig = &signals[i];
 
-            /* CAN ID 匹配 (忽略 IDE/扩展帧位) */
-            uint32_t frame_id = frame.can_id & CAN_SFF_MASK;
-            if (frame_id != sig->can_id) continue;
+            bool sig_extended = (sig->can_id & CAN_EFF_FLAG) != 0;
+            uint32_t sig_id = sig->can_id &
+                (sig_extended ? CAN_EFF_MASK : CAN_SFF_MASK);
+            if (frame_extended != sig_extended || frame_id != sig_id) continue;
 
-            /* 检查数据长度是否覆盖信号 */
-            int max_bit = sig->start_bit + sig->length;
-            if (max_bit > (int)frame.can_dlc * 8) continue;
+            uint64_t raw;
+            if (!extract_signal(frame.data, frame.can_dlc,
+                                sig->start_bit, sig->length,
+                                sig->byte_order, &raw)) {
+                LOG_WARN("CAN: invalid signal layout for ID=0x%X %s",
+                         frame_id, sig->signal_name);
+                continue;
+            }
 
-            /* 提取并转换物理值 */
-            uint64_t raw = extract_signal(frame.data, sig->start_bit,
-                                          sig->length);
             double value = (double)raw * sig->scale + sig->offset;
 
             LOG_DEBUG("CAN: ID=0x%X %s = %.2f %s",
@@ -98,7 +123,7 @@ static void *can_recv_thread_func(void *arg)
 
             /* 回调通知 */
             if (user_cb) {
-                user_cb(frame_id, sig->signal_name, value, sig->unit);
+                user_cb(callback_id, sig->signal_name, value, sig->unit);
             }
 
             /* 发布到数据总线 */
@@ -149,9 +174,10 @@ int can_manager_add_signal(const can_signal_config_t *config)
     memcpy(&signals[signal_count], config, sizeof(can_signal_config_t));
     signal_count++;
 
-    LOG_INFO("CAN: added signal ID=0x%X %s (start=%d, len=%d, scale=%.3f, offset=%.1f) [%s]",
+    LOG_INFO("CAN: added signal ID=0x%X %s (start=%d, len=%d, order=%s, scale=%.3f, offset=%.1f) [%s]",
              config->can_id, config->signal_name,
              config->start_bit, config->length,
+             config->byte_order == CAN_BYTE_ORDER_MOTOROLA ? "Motorola" : "Intel",
              config->scale, config->offset, config->unit);
     return 0;
 }
@@ -173,10 +199,10 @@ int can_manager_start(void)
         return 0;
     }
 
-    running = true;
+    atomic_store(&running, true);
     if (pthread_create(&recv_thread, NULL, can_recv_thread_func, NULL) != 0) {
         LOG_ERROR("CAN: thread create failed");
-        running = false;
+        atomic_store(&running, false);
         return -1;
     }
 
@@ -185,7 +211,7 @@ int can_manager_start(void)
 
 void can_manager_stop(void)
 {
-    running = false;
+    atomic_store(&running, false);
     if (recv_thread) {
         pthread_join(recv_thread, NULL);
     }
