@@ -16,6 +16,7 @@
 #include "../app_config.h"
 #include "../services/mqtt_client.h"
 #include "../services/data_bus.h"
+#include "../services/modbus_master.h"
 #include "../ota_manager.h"
 #include "../ntp_sync.h"
 #include <stdio.h>
@@ -27,10 +28,9 @@ extern void web_send_response(int client_fd, int status,
                               const char *content_type,
                               const char *body, size_t body_len);
 
-/* 外部全局变量: main.c 中的 CAN / Modbus 计数器 */
+/* CAN 发送计数仍由主程序测试发送路径提供；Modbus 计数由服务模块维护 */
 extern int can_tx_cnt;
 extern int can_rx_cnt;
-extern int rs485_tx_cnt;
 
 void api_status_handle(int client_fd)
 {
@@ -116,7 +116,7 @@ void api_status_handle(int client_fd)
         /* modbus */
         modbus_count > 0 ? "true" : "false",
         modbus_count,
-        rs485_tx_cnt,
+        modbus_master_get_tx_count(),
         /* can */
         can_count > 0 ? "true" : "false",
         can_count,
