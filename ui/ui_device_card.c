@@ -5,20 +5,33 @@
 
 #include "ui_device_card.h"
 #include <stdio.h>
+#include <stdlib.h>
+
+typedef struct {
+    lv_obj_t *label_name;
+    lv_obj_t *label_value;
+    lv_obj_t *label_unit;
+    lv_obj_t *dot;
+} device_card_ctx_t;
+
+static void device_card_delete_cb(lv_event_t *e)
+{
+    device_card_ctx_t *ctx = (device_card_ctx_t *)lv_event_get_user_data(e);
+    free(ctx);
+}
 
 void ui_device_card_update(lv_obj_t *card, const char *point_name,
                            double value, const char *unit, bool valid)
 {
     if (!card) return;
 
-    /* 卡片是一个容器, 内部存储子控件引用作为 user_data */
-    lv_obj_t **children = (lv_obj_t **)lv_obj_get_user_data(card);
-    if (!children) return;
+    device_card_ctx_t *ctx = (device_card_ctx_t *)lv_obj_get_user_data(card);
+    if (!ctx) return;
 
-    lv_obj_t *label_name  = children[0];  /* 数据点名称 */
-    lv_obj_t *label_value = children[1];  /* 数值 */
-    lv_obj_t *label_unit  = children[2];  /* 单位 */
-    lv_obj_t *dot         = children[3];  /* 状态灯 */
+    lv_obj_t *label_name  = ctx->label_name;
+    lv_obj_t *label_value = ctx->label_value;
+    lv_obj_t *label_unit  = ctx->label_unit;
+    lv_obj_t *dot         = ctx->dot;
 
     if (label_name) {
         lv_label_set_text(label_name, point_name ? point_name : "--");
@@ -113,18 +126,17 @@ lv_obj_t *ui_device_card_create(lv_obj_t *parent, const char *device_name,
     lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_border_width(dot, 0, 0);
 
-    /* 存储子控件引用 (用于后续更新) */
-    /* LVGL 9.x 使用 lv_obj_set_user_data / lv_obj_get_user_data */
-    /* 但 user_data 只能存一个指针, 我们动态分配子控件指针数组 */
-    /* 简化: 使用特定的子控件 ID 或者把引用存在容器中 */
-    /* 这里我们用一个技巧: 把 key=label_name 存储在 card 的 user_data */
-    /* 实际实现用一个结构体来存储所有子控件指针 */
-    static lv_obj_t *child_buf[4];  /* WARNING: 非线程安全, 仅适用于 demonstraction */
-    child_buf[0] = label_name;
-    child_buf[1] = label_value;
-    child_buf[2] = label_unit;
-    child_buf[3] = dot;
-    lv_obj_set_user_data(card, child_buf);
+    device_card_ctx_t *ctx = calloc(1, sizeof(*ctx));
+    if (!ctx) {
+        lv_obj_delete(card);
+        return NULL;
+    }
+    ctx->label_name = label_name;
+    ctx->label_value = label_value;
+    ctx->label_unit = label_unit;
+    ctx->dot = dot;
+    lv_obj_set_user_data(card, ctx);
+    lv_obj_add_event_cb(card, device_card_delete_cb, LV_EVENT_DELETE, ctx);
 
     return card;
 }
