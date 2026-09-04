@@ -49,7 +49,7 @@ int mqtt_client_init(const char *broker, int port, const char *topic,
  * @brief 设置设备认证信息 (华为云IoT等平台需要)
  * @param device_id     设备ID (用户名)
  * @param device_secret 设备密钥 (密码, 或用于生成HMAC签名)
- * @note  必须在 mqtt_client_init() 之后、mqtt_client_start() 之前调用
+ * @note  推荐在 mqtt_client_init() 之前调用；也支持运行中更新，下一次连接生效
  */
 void mqtt_client_set_auth(const char *device_id, const char *device_secret);
 
