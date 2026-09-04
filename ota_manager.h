@@ -6,7 +6,7 @@
  *   - HTTP 远程检查更新 (请求 version.json)
  *   - HTTP 下载固件包 (断点续传 + 进度回调)
  *   - SHA256 完整性校验 (带进度)
- *   - 固件签名验证框架 (可插拔)
+ *   - RSA-PSS + SHA-256 OTA manifest 数字签名验证 (OpenSSL EVP)
  *   - 版本号比较防止降级攻击
  *   - 下载超时/重试机制 (3次)
  *   - 备份+自动回滚机制
@@ -15,7 +15,7 @@
  *
  * 安全设计:
  *   - SHA256 校验确保固件完整性
- *   - 可插拔签名验证 (RSA/ED25519/HMAC)
+ *   - 设备端内置 RSA-PSS/SHA-256 验签，私钥只保留在发布服务器
  *   - 备份+回滚防止变砖
  *   - 版本号字符串比较防止降级
  *   - 固件大小限制 (默认 16MB)
@@ -83,7 +83,7 @@ typedef struct {
     char    filename[128];      /**< 全量固件/应用 文件名 */
     char    sha256[65];         /**< 全量文件 SHA256 校验和 (hex) */
     char    changelog[512];     /**< 更新日志 */
-    char    signature[512];     /**< 固件签名 (hex, 可选) */
+    char    signature[1025];    /**< manifest RSA 签名 (hex, 支持至 RSA-4096) */\n    char    signature_algorithm[32]; /**< 签名算法, 当前必须为 RSA-PSS-SHA256 */
     int64_t size;               /**< 全量文件大小 (字节) */
     bool    force_update;       /**< 是否强制更新 */
 
@@ -99,16 +99,18 @@ typedef struct {
 typedef void (*ota_progress_cb)(int percent, const char *msg);
 
 /**
- * @brief 固件签名验证回调
- * @param firmware_path  下载的固件文件路径
- * @param signature_hex  期望的签名 (hex 字符串, 来自 version.json)
+ * @brief 自定义 OTA manifest 签名验证回调
+ * @param manifest       规范化后的 OTA manifest 原文
+ * @param manifest_len   manifest 长度
+ * @param signature_hex  version.json 中的十六进制签名
  * @return true=签名有效, false=签名无效
  *
- * 如果 version.json 提供 signature，则必须设置此回调并验证通过；
- * OTA_REQUIRE_SIGNATURE=1 时，服务器未提供 signature 也会拒绝升级。
- * 实现示例: 读取公钥 → 验证 ECDSA/RSA/ED25519 签名。
+ * 默认情况下无需设置该回调，系统会使用 OpenSSL EVP +
+ * RSA-PSS/SHA-256 和 OTA_PUBLIC_KEY_PATH 中的 PEM 公钥进行验签。
+ * 只有需要替换为安全芯片、HSM 或其他算法时才覆盖此回调。
  */
-typedef bool (*ota_signature_verify_cb)(const char *firmware_path,
+typedef bool (*ota_signature_verify_cb)(const uint8_t *manifest,
+                                        size_t manifest_len,
                                         const char *signature_hex);
 
 /**
@@ -152,10 +154,18 @@ void ota_set_app_install_path(const char *path);
 void ota_set_progress_callback(ota_progress_cb cb);
 
 /**
- * @brief 设置签名验证回调 (不设置则仅做 SHA256 校验)
- * @param cb 签名验证函数指针 (NULL=跳过签名验证)
+ * @brief 设置自定义 manifest 签名验证回调
+ *
+ * 默认使用内置 RSA-PSS/SHA-256 + PEM 公钥验签。
+ * 传 NULL 恢复内置验签实现。
  */
 void ota_set_signature_verify_callback(ota_signature_verify_cb cb);
+
+/**
+ * @brief 覆盖 OTA 公钥路径
+ * @param path PEM 公钥文件路径；NULL/空字符串恢复 app_config.h 默认路径
+ */
+void ota_set_public_key_path(const char *path);
 
 /** 注册平台 Firmware OTA 写入后端；未注册时 Firmware 模式会安全失败 */
 void ota_set_firmware_apply_callback(ota_firmware_apply_cb cb);
