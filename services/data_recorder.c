@@ -118,9 +118,13 @@ int data_recorder_get_buffered_count(void)
 void data_recorder_tick(void)
 {
     time_t now = time(NULL);
+    bool should_flush;
 
-    /* 到达写入间隔时自动 flush */
-    if (now - last_flush_time >= DB_WRITE_INTERVAL) {
+    pthread_mutex_lock(&rec_mutex);
+    should_flush = (now - last_flush_time >= DB_WRITE_INTERVAL);
+    pthread_mutex_unlock(&rec_mutex);
+
+    if (should_flush) {
         data_recorder_flush();
     }
 }
