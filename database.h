@@ -95,6 +95,11 @@ int database_insert_device_data(const char *source, const char *device,
                                  const char *point_name, double value,
                                  const char *unit, bool valid);
 
+/** 按指定采样时间写入通用设备数据，供 RAM 批量缓存刷新使用 */
+int database_insert_device_data_at(time_t timestamp, const char *source,
+                                    const char *device, const char *point_name,
+                                    double value, const char *unit, bool valid);
+
 /**
  * @brief 关闭数据库
  */
