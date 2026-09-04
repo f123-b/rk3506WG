@@ -680,6 +680,7 @@ int main(void)
     tzset();
 
     logger_init(LOG_FILE_PATH);
+    logger_set_level(LOG_LEVEL);
     LOG_INFO("=== System starting v%s ===", APP_VERSION);
 
     watchdog_init(60);
