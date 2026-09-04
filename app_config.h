@@ -46,6 +46,7 @@
 #define OTA_APP_INSTALL_PATH  "/oem/my_test"               /**< App OTA: 应用安装目标路径 */
 #define OTA_APP_STOP_CMD      "killall my_test"            /**< App OTA: 停止应用命令 */
 #define OTA_APP_START_CMD     "/oem/my_test &"            /**< App OTA: 启动应用命令 */
+#define OTA_REQUIRE_SIGNATURE  0                           /**< 1=服务器必须提供签名且必须验证 */
 
 /* ==================== 日志配置 ==================== */
 #define LOG_FILE_PATH       "/tmp/my_test.log"  /**< 日志文件路径 (NULL=不写文件) */
