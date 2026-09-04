@@ -31,8 +31,6 @@
 #include <sys/stat.h>
 
 /* ==================== 配置常量 ==================== */
-#define OTA_DEFAULT_SERVER       "http://192.168.5.10:9090"
-#define OTA_DOWNLOAD_PATH        "/tmp/my_test_new"
 #define OTA_MAX_FIRMWARE_SIZE    (16 * 1024 * 1024)  /**< 最大固件 16MB */
 #define OTA_HTTP_TIMEOUT         30                   /**< HTTP 超时 (秒) */
 #define OTA_DOWNLOAD_TIMEOUT     300                  /**< 下载超时 (秒) */
@@ -44,27 +42,12 @@
 #define OTA_HEALTH_FILE          "/tmp/ota_ok"          /**< 健康标志 */
 #define OTA_ROLLBACK_GRACE_SEC   15                     /**< 回滚宽限期 (秒) */
 
-/* 应用版本号 */
-#ifndef APP_VERSION
-#define APP_VERSION  "3.0.0"
-#endif
-
-/* App 模式默认配置 */
-#ifndef OTA_APP_INSTALL_PATH
-#define OTA_APP_INSTALL_PATH  "/oem/my_test"
-#endif
-#ifndef OTA_APP_STOP_CMD
-#define OTA_APP_STOP_CMD      "killall my_test"
-#endif
-#ifndef OTA_APP_START_CMD
-#define OTA_APP_START_CMD     "/oem/my_test &"
-#endif
-
 /* ==================== 内部状态 ==================== */
 static char  ota_server_url[256] = OTA_DEFAULT_SERVER;
 static ota_version_info_t ota_remote_info;
 static ota_progress_cb    ota_progress_callback = NULL;
 static ota_signature_verify_cb ota_signature_callback = NULL;
+static ota_firmware_apply_cb ota_firmware_apply_callback = NULL;
 
 static ota_status_t ota_state = OTA_IDLE;
 static ota_error_t  ota_last_error  = OTA_ERR_NONE;
@@ -546,6 +529,12 @@ void ota_set_signature_verify_callback(ota_signature_verify_cb cb)
     printf("OTA: signature verify %s\n", cb ? "enabled" : "disabled");
 }
 
+void ota_set_firmware_apply_callback(ota_firmware_apply_cb cb)
+{
+    ota_firmware_apply_callback = cb;
+    printf("OTA: firmware apply backend %s\n", cb ? "configured" : "not configured");
+}
+
 /**
  * @brief 应用差分补丁: bspatch <旧文件> <新文件> <补丁文件>
  */
@@ -1019,8 +1008,17 @@ verify_stage:
 
     printf("OTA: SHA256 verified OK\n");
 
-    /* ===== 阶段2.5: 签名验证 (可选, 通过回调) ===== */
-    if (ota_signature_callback && ota_remote_info.signature[0]) {
+    /* ===== 阶段2.5: 签名验证 =====
+     * 服务器一旦提供 signature 就禁止静默跳过；强制签名策略下缺签名也拒绝。 */
+    if (ota_remote_info.signature[0]) {
+        if (!ota_signature_callback) {
+            set_error(OTA_ERR_SIGNATURE,
+                      "Signature present but verifier is not configured");
+            ota_state = OTA_FAILED;
+            unlink(dl_path);
+            return false;
+        }
+
         if (ota_progress_callback)
             ota_progress_callback(96, "Verifying signature...");
 
@@ -1032,6 +1030,11 @@ verify_stage:
             return false;
         }
         printf("OTA: signature verified OK\n");
+    } else if (OTA_REQUIRE_SIGNATURE) {
+        set_error(OTA_ERR_SIGNATURE, "Firmware signature is required but missing");
+        ota_state = OTA_FAILED;
+        unlink(dl_path);
+        return false;
     }
 
     /* ===== 阶段2.6: 差分补丁应用 ===== */
@@ -1067,14 +1070,26 @@ verify_stage:
         return true;
     }
 
-    /* Firmware 模式: 下载完成, 等待用户手动触发固件烧写 */
-    if (ota_progress_callback)
-        ota_progress_callback(99, "Firmware downloaded, ready to flash");
+    /* Firmware 模式必须由 BSP/产品层提供安全的分区写入实现。
+     * 未配置后端时不能把“仅下载成功”错误上报成 OTA_SUCCESS。 */
+    if (!ota_firmware_apply_callback) {
+        set_error(OTA_ERR_WRITE, "Firmware apply backend is not configured");
+        pthread_mutex_lock(&ota_mutex);
+        ota_state = OTA_FAILED;
+        pthread_mutex_unlock(&ota_mutex);
+        return false;
+    }
 
-    printf("OTA (firmware): image ready at %s\n", OTA_DOWNLOAD_PATH);
-    printf("OTA (firmware): SHA256 verified, manual flash required\n");
-    printf("OTA (firmware): To flash: dd if=%s of=<flash_partition> bs=4M\n",
-           OTA_DOWNLOAD_PATH);
+    if (ota_progress_callback)
+        ota_progress_callback(99, "Applying firmware image...");
+
+    if (!ota_firmware_apply_callback(OTA_DOWNLOAD_PATH)) {
+        set_error(OTA_ERR_WRITE, "Firmware apply backend failed");
+        pthread_mutex_lock(&ota_mutex);
+        ota_state = OTA_FAILED;
+        pthread_mutex_unlock(&ota_mutex);
+        return false;
+    }
 
     pthread_mutex_lock(&ota_mutex);
     ota_state = OTA_SUCCESS;
@@ -1082,7 +1097,7 @@ verify_stage:
     pthread_mutex_unlock(&ota_mutex);
 
     if (ota_progress_callback)
-        ota_progress_callback(100, "Firmware ready, waiting for flash");
+        ota_progress_callback(100, "Firmware applied successfully");
 
     return true;
 }
