@@ -932,8 +932,17 @@ bool ota_check_update(ota_version_info_t *info)
     /* 保存远程信息 */
     memcpy(&ota_remote_info, info, sizeof(ota_remote_info));
 
-    /* 版本比较 */
-    if (version_compare(info->version, APP_VERSION) <= 0 && !info->force_update) {
+    /* 版本比较 / 防重放降级 */
+    int version_cmp = version_compare(info->version, APP_VERSION);
+    if (version_cmp < 0 && !(info->force_update && OTA_ALLOW_SIGNED_DOWNGRADE)) {
+        pthread_mutex_lock(&ota_mutex);
+        ota_state = OTA_IDLE;
+        set_error(OTA_ERR_VERSION, "Signed downgrade is blocked by policy");
+        pthread_mutex_unlock(&ota_mutex);
+        return false;
+    }
+
+    if (version_cmp == 0 && !info->force_update) {
         pthread_mutex_lock(&ota_mutex);
         ota_state = OTA_IDLE;
         set_error(OTA_ERR_NO_UPDATE, "Already latest version");
