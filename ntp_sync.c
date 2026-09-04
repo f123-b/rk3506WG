@@ -13,6 +13,7 @@
  */
 
 #include "ntp_sync.h"
+#include "app_config.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,7 +27,6 @@
 #include <errno.h>
 
 /* ==================== 配置 ==================== */
-#define NTP_SYNC_INTERVAL  3600          /**< 校准间隔 (秒), 1小时 */
 #define NTP_PORT           123           /**< NTP 标准端口 */
 #define NTP_PACKET_SIZE    48            /**< NTP 请求/响应包大小 */
 #define NTP_TIMEOUT_SEC    5             /**< 单个服务器超时 (秒) */
