@@ -15,11 +15,14 @@
 
 #include "../database.h"
 
-#define DATA_BUF_MAX  120  /**< 缓冲区最大条数 (2小时数据) */
+#define DATA_BUF_MAX         120  /**< MQTT 温湿度缓冲 */
+#define DEVICE_DATA_BUF_MAX  256  /**< Modbus/CAN 通用数据缓冲 */
 
 /* ==================== 模块状态 ==================== */
 static data_record_t buffer[DATA_BUF_MAX];
 static int buffered_count = 0;
+static data_point_t device_buffer[DEVICE_DATA_BUF_MAX];
+static int device_buffered_count = 0;
 static time_t last_flush_time = 0;
 static pthread_mutex_t rec_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -46,8 +49,28 @@ static void data_recorder_flush_locked(void)
         }
     }
 
-    LOG_DEBUG("Flushed %d/%d records to DB", written, buffered_count);
+    int device_written = 0;
+    for (int i = 0; i < device_buffered_count; i++) {
+        data_point_t *pt = &device_buffer[i];
+        const char *source = "unknown";
+        switch (pt->source) {
+            case DATA_SOURCE_MQTT:   source = "mqtt"; break;
+            case DATA_SOURCE_MODBUS: source = "modbus"; break;
+            case DATA_SOURCE_CAN:    source = "can"; break;
+            default: break;
+        }
+
+        if (database_insert_device_data_at(pt->timestamp, source,
+                                           pt->device_name, pt->point_name,
+                                           pt->value, pt->unit, pt->valid) == 0) {
+            device_written++;
+        }
+    }
+
+    LOG_DEBUG("Flushed sensor=%d/%d device=%d/%d records to DB",
+              written, buffered_count, device_written, device_buffered_count);
     buffered_count = 0;
+    device_buffered_count = 0;
     last_flush_time = time(NULL);
 }
 
@@ -63,6 +86,7 @@ int data_recorder_init(void)
 
     last_flush_time = time(NULL);
     buffered_count = 0;
+    device_buffered_count = 0;
     offline_count = 0;
 
     /* 清理过期数据 */
@@ -99,6 +123,20 @@ void data_recorder_record(float temp, float humi, bool valid)
     pthread_mutex_unlock(&rec_mutex);
 }
 
+void data_recorder_record_data_point(const data_point_t *point)
+{
+    if (!point) return;
+
+    pthread_mutex_lock(&rec_mutex);
+    if (device_buffered_count >= DEVICE_DATA_BUF_MAX) {
+        LOG_WARN("Device data buffer full, flushing...");
+        data_recorder_flush_locked();
+    }
+
+    device_buffer[device_buffered_count++] = *point;
+    pthread_mutex_unlock(&rec_mutex);
+}
+
 void data_recorder_flush(void)
 {
     pthread_mutex_lock(&rec_mutex);
@@ -110,7 +148,7 @@ int data_recorder_get_buffered_count(void)
 {
     int count;
     pthread_mutex_lock(&rec_mutex);
-    count = buffered_count;
+    count = buffered_count + device_buffered_count;
     pthread_mutex_unlock(&rec_mutex);
     return count;
 }
