@@ -13,6 +13,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <time.h>
+#include <stdatomic.h>
 
 /* ==================== 配置 ==================== */
 #define MAX_SIGNALS  32   /**< 最大信号配置数 */
@@ -23,7 +24,7 @@ static int signal_count = 0;
 static can_data_callback_t user_cb = NULL;
 static can_raw_frame_callback_t raw_cb = NULL;
 static pthread_t recv_thread;
-static bool running = false;
+static atomic_bool running = false;
 static char if_name[16];
 
 /* ==================== CAN 帧解析 ==================== */
@@ -31,8 +32,8 @@ static char if_name[16];
 /**
  * @brief 从 CAN 帧数据中提取指定位置和长度的信号值
  *
- * 支持 Intel (little-endian) 和 Motorola (big-endian) 两种字节序。
- * 简化实现: 假设 Intel 格式 (LSB first), 信号不跨字节边界。
+ * 支持 Intel (little-endian) 和 Motorola/DBC (big-endian) 两种字节序，
+ * 两种模式均支持跨字节信号。
  *
  * @param data       CAN 帧 8 字节数据
  * @param start_bit  起始位
@@ -84,7 +85,7 @@ static void *can_recv_thread_func(void *arg)
 
     LOG_INFO("CAN: receiver thread started, %d signals", signal_count);
 
-    while (running) {
+    while (atomic_load(&running)) {
         int rc = can_read_frame(&frame, 1000);  /* 1秒超时, 便于退出检查 */
         if (rc <= 0) continue;
 
@@ -198,10 +199,10 @@ int can_manager_start(void)
         return 0;
     }
 
-    running = true;
+    atomic_store(&running, true);
     if (pthread_create(&recv_thread, NULL, can_recv_thread_func, NULL) != 0) {
         LOG_ERROR("CAN: thread create failed");
-        running = false;
+        atomic_store(&running, false);
         return -1;
     }
 
@@ -210,7 +211,7 @@ int can_manager_start(void)
 
 void can_manager_stop(void)
 {
-    running = false;
+    atomic_store(&running, false);
     if (recv_thread) {
         pthread_join(recv_thread, NULL);
     }
