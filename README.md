@@ -1,9 +1,9 @@
-# 环境监测站 (Environment Monitor) v3.1.5
+# 环境监测站 (Environment Monitor) v3.1.6
 
 基于 **RK3506 + LVGL v9.1 + MQTT + SQLite3 + HTTP + NTP + OTA + Modbus + CAN** 的嵌入式物联网边缘网关系统。
 4 标签页 UI（MQTT / Modbus / CAN / OTA），多协议工业传感器接入，Web 远程监控，App 热更新 OTA（备份回滚 + 断点续传 + 签名验证框架）。
 
-> **v3.1.5 工程修复**：修复 DataRecorder 递归锁死锁、LVGL 跨线程更新、MQTT/CAN/Modbus 共享状态竞争；MQTT/Modbus/CAN 统一接入 DataBus，Modbus/CAN 通过 RAM 缓冲写入 device_data；Web 历史接口改为真实 SQLite 数据；Watchdog 改为主循环心跳；补齐 CAN 扩展帧/Motorola 解析、真实健康检查、Host Simulation Stub 与 OTA 安全后端约束。
+> **v3.1.6 OTA 安全增强**：在 v3.1.5 工程修复基础上，正式接入 **RSA-PSS + SHA-256 数字签名**。设备端使用 OpenSSL EVP 和 `/oem/keys/ota_public_key.pem` 验证 signed manifest，只有验签通过后才信任版本号、更新类型、SHA256、差分参数和 `force_update`；默认强制签名并禁止已签名旧版本降级重放。仓库新增密钥生成/manifest 签名工具、篡改拒绝 CI 测试和 `docs/OTA_SIGNATURE.md`。\n\n> **v3.1.5 工程修复**：修复 DataRecorder 递归锁死锁、LVGL 跨线程更新、MQTT/CAN/Modbus 共享状态竞争；MQTT/Modbus/CAN 统一接入 DataBus，Modbus/CAN 通过 RAM 缓冲写入 device_data；Web 历史接口改为真实 SQLite 数据；Watchdog 改为主循环心跳；补齐 CAN 扩展帧/Motorola 解析、真实健康检查、Host Simulation Stub 与 OTA 安全后端约束。
 
 ---
 
@@ -630,7 +630,7 @@ App 热更新完成后，应用会自动重启。浏览器刷新后检查 `/api/
 | 新版本启动后自动回到旧版本 | 健康标志未在15秒内写入 (新进程启动太慢) | 检查 DRM/LVGL 初始化是否正常; `cat /tmp/ota_error.log` 查看回滚日志; 健康标志在 `lv_refr_now` 后立即写入 (~2秒), 不依赖延迟服务初始化 |
 | 下载网络中断后从头开始 | 旧版不支持断点续传 | v3.1 支持 HTTP Range 头，自动检测已有文件大小并续传 |
 | 重复触发OTA导致异常 | 旧版无并发保护 | v3.1 使用 `ota_try_lock()` 互斥锁，重复触发返回 "OTA already in progress" |
-| 签名验证失败 | version.json 中 signature 字段错误 | 检查签名生成算法; 如不使用签名可留空 `"signature":""` |
+| 签名验证失败 | version.json 中 signature 字段错误 | 检查签名生成算法; v3.1.6 默认 `OTA_REQUIRE_SIGNATURE=1`，不能留空；使用 `tools/ota_sign_manifest.py` 生成签名版 `version.json` |
 | OTA 后 HTTP 无响应 | killall 导致旧连接的 CLOSE-WAIT 堆积 | `killall my_test && /oem/my_test &` 重启即可清除; 这是 POSIX socket 服务器的已知局限 |
 
 ### OTA 实测记录 (2026-07-09)
@@ -718,7 +718,7 @@ App 热更新完成后，应用会自动重启。浏览器刷新后检查 `/api/
 > - 在 ARM Linux 平台 (Linux 6.1 / Buildroot / CMake / C11) 完成嵌入式应用全栈开发
 > - 采用**六层模块化架构**: HAL硬件抽象层 → Services服务层 → UI(4标签页) → Web网络层 → Storage存储层 → Infra基础设施
 > - 实现**多协议传感器数据采集**: 4标签页暗色主题 UI (DRM DIRECT 零拷贝, 480×800) + MQTT (Mosquitto + 设备认证) + Modbus RTU (RS485, GPIO方向控制) + CAN (SocketCAN, loopback模式), 通过数据总线统一汇聚
-> - **从零设计企业级双模 OTA (v3.1 全面增强)**: ① App热更新 (后台脚本原子替换+秒级重启) ② 固件整机升级 — SHA256校验 (FIPS 180-4 独立模块+进度回调) + **可插拔签名验证框架** + **备份+自动回滚** (健康标志) + **HTTP Range 断点续传** + **并发锁守卫** + 鲁棒JSON解析 + 版本防降级 + select超时 + 3次重试 + LVGL进度 + Web API + 两步操作流程
+> - **从零设计企业级双模 OTA (v3.1 全面增强)**: ① App热更新 (后台脚本原子替换+秒级重启) ② 固件整机升级 — SHA256校验 (FIPS 180-4 独立模块+进度回调) + **RSA-PSS/SHA-256 signed manifest 验签** + **备份+自动回滚** (健康标志) + **HTTP Range 断点续传** + **并发锁守卫** + 鲁棒JSON解析 + 版本防降级 + select超时 + 3次重试 + LVGL进度 + Web API + 两步操作流程
 > - **嵌入式 HTTP/1.0 服务器** (POSIX raw socket): REST API (JSON) + 静态文件 + CORS + 多线程 + 综合状态API (/api/status, 聚合 MQTT/Modbus/CAN/OTA/System)
 > - **NTP 时间同步** (UDP) + 防烧屏背光控制 (空闲渐变→触控唤醒) + Mosquitto开机自启
 > - **可靠性**: 硬件看门狗 + 分级日志 + SQLite WAL + MQTT 指数退避重连 + pthread_mutex
@@ -791,7 +791,7 @@ curl -X POST http://192.168.5.10:8080/api/ota/start  # 下载安装
 | **cJSON** | JSON 解析 | Buildroot 自带 |
 | **libdrm** | DRM 显示接口 | Buildroot 自带 |
 | **SQLite3** | 数据库 | amalgamation, 编译进项目 |
-| **libpthread** | POSIX 线程 | 系统自带 |
+| **libpthread** | POSIX 线程 | 系统自带 |\n| **OpenSSL / libcrypto** | RSA-PSS + SHA-256 OTA 数字签名验签 | v3.1.6 新增 |
 
 ---
 
