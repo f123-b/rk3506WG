@@ -3,7 +3,9 @@
 基于 **RK3506 + LVGL v9.1 + MQTT + SQLite3 + HTTP + NTP + OTA + Modbus + CAN** 的嵌入式物联网边缘网关系统。
 4 标签页 UI（MQTT / Modbus / CAN / OTA），多协议工业传感器接入，Web 远程监控，App 热更新 OTA（备份回滚 + 断点续传 + 签名验证框架）。
 
-> **v3.1.6 OTA 安全增强**：在 v3.1.5 工程修复基础上，正式接入 **RSA-PSS + SHA-256 数字签名**。设备端使用 OpenSSL EVP 和 `/oem/keys/ota_public_key.pem` 验证 signed manifest，只有验签通过后才信任版本号、更新类型、SHA256、差分参数和 `force_update`；默认强制签名并禁止已签名旧版本降级重放。仓库新增密钥生成/manifest 签名工具、篡改拒绝 CI 测试和 `docs/OTA_SIGNATURE.md`。\n\n> **v3.1.5 工程修复**：修复 DataRecorder 递归锁死锁、LVGL 跨线程更新、MQTT/CAN/Modbus 共享状态竞争；MQTT/Modbus/CAN 统一接入 DataBus，Modbus/CAN 通过 RAM 缓冲写入 device_data；Web 历史接口改为真实 SQLite 数据；Watchdog 改为主循环心跳；补齐 CAN 扩展帧/Motorola 解析、真实健康检查、Host Simulation Stub 与 OTA 安全后端约束。
+> **v3.1.6 OTA 安全增强**：在 v3.1.5 工程修复基础上，正式接入 **RSA-PSS + SHA-256 数字签名**。设备端使用 OpenSSL EVP 和 `/oem/keys/ota_public_key.pem` 验证 signed manifest，只有验签通过后才信任版本号、更新类型、SHA256、差分参数和 `force_update`；默认强制签名并禁止已签名旧版本降级重放。仓库新增密钥生成/manifest 签名工具、篡改拒绝 CI 测试和 `docs/OTA_SIGNATURE.md`。
+
+> **v3.1.5 工程修复**：修复 DataRecorder 递归锁死锁、LVGL 跨线程更新、MQTT/CAN/Modbus 共享状态竞争；MQTT/Modbus/CAN 统一接入 DataBus，Modbus/CAN 通过 RAM 缓冲写入 device_data；Web 历史接口改为真实 SQLite 数据；Watchdog 改为主循环心跳；补齐 CAN 扩展帧/Motorola 解析、真实健康检查、Host Simulation Stub 与 OTA 安全后端约束。
 
 ---
 
@@ -791,8 +793,9 @@ curl -X POST http://192.168.5.10:8080/api/ota/start  # 下载安装
 | **cJSON** | JSON 解析 | Buildroot 自带 |
 | **libdrm** | DRM 显示接口 | Buildroot 自带 |
 | **SQLite3** | 数据库 | amalgamation, 编译进项目 |
-| **libpthread** | POSIX 线程 | 系统自带 |\n| **OpenSSL / libcrypto** | RSA-PSS + SHA-256 OTA 数字签名验签 | v3.1.6 新增 |
+| **libpthread** | POSIX 线程 | 系统自带 |
+| **OpenSSL / libcrypto** | RSA-PSS + SHA-256 OTA 数字签名验签 | v3.1.6 新增 |
 
 ---
 
-*文档更新: 2026-07-09 | 版本: v3.1.3*
+*文档更新: 2026-09-04 | 版本: v3.1.6*
