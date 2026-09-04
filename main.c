@@ -87,6 +87,14 @@ static char g_can_signal_name[32] = "";
 static char g_can_signal_unit[16] = "";
 static float g_can_signal_value = 0.0f;
 
+/* Modbus 线程同样只写缓存，由 LVGL 主线程刷新页面 */
+static pthread_mutex_t g_modbus_ui_mutex = PTHREAD_MUTEX_INITIALIZER;
+static bool g_modbus_pending = false;
+static int g_modbus_slave_id = 0;
+static char g_modbus_device_name[32] = "";
+static uint16_t g_modbus_regs[16] = {0};
+static int g_modbus_reg_count = 0;
+
 /* 测试/运行计数器 */
 int can_tx_cnt = 0, can_rx_cnt = 0;  /* extern: web/api_status.c */
 int rs485_tx_cnt = 0;                /* extern: web/api_status.c */
@@ -400,6 +408,23 @@ static void btn_modbus_auto_cb(lv_event_t *e)
     LOG_INFO("Auto polling toggled: %d", enabled);
 }
 
+/* Modbus 数据回调：运行在轮询线程，只复制数据，不直接操作 LVGL */
+static void modbus_recv_cb(int slave_id, const char *device_name,
+                           uint16_t *regs, int nb_regs)
+{
+    pthread_mutex_lock(&g_modbus_ui_mutex);
+    g_modbus_slave_id = slave_id;
+    strncpy(g_modbus_device_name, device_name ? device_name : "Modbus",
+            sizeof(g_modbus_device_name) - 1);
+    g_modbus_device_name[sizeof(g_modbus_device_name) - 1] = '\0';
+    g_modbus_reg_count = nb_regs > 16 ? 16 : nb_regs;
+    if (g_modbus_reg_count > 0) {
+        memcpy(g_modbus_regs, regs, (size_t)g_modbus_reg_count * sizeof(uint16_t));
+    }
+    g_modbus_pending = true;
+    pthread_mutex_unlock(&g_modbus_ui_mutex);
+}
+
 /* ==================== CAN 新按钮回调 ==================== */
 static void btn_can_listen_cb(lv_event_t *e)
 {
@@ -554,19 +579,33 @@ static void timer_1s_cb(lv_timer_t *timer)
     ui_page_mqtt_set_status(mqtt_client_is_connected(),
                              mqtt_client_get_retry_count());
 
-    /* Modbus 页面刷新 */
-#if RS485_TEST_SEND_ENABLE
-    ui_page_modbus_update_tx(rs485_tx_cnt, rs485_tx_ok);
-    ui_page_modbus_update_rx(rs485_tx_cnt > 0 ? rs485_tx_cnt / 2 : 0, rs485_tx_ok);
-    ui_page_modbus_set_led(rs485_tx_ok);
-    /* 模拟从站数据刷新 (从 MQTT 传感器数据派生) */
-    if (g_latest_valid) {
-        uint16_t sim_regs[2];
-        sim_regs[0] = (uint16_t)(g_latest_temp * 10.0f);
-        sim_regs[1] = (uint16_t)(g_latest_humi * 10.0f);
-        ui_page_modbus_update_slave(1, "Temp/Humi Sensor", 2, sim_regs, true);
+    /* Modbus 页面刷新：显示真实轮询结果而不是 MQTT 派生模拟值 */
+    bool modbus_pending;
+    int modbus_slave_id, modbus_reg_count;
+    char modbus_device_name[32];
+    uint16_t modbus_regs[16];
+
+    pthread_mutex_lock(&g_modbus_ui_mutex);
+    modbus_pending = g_modbus_pending;
+    modbus_slave_id = g_modbus_slave_id;
+    modbus_reg_count = g_modbus_reg_count;
+    strncpy(modbus_device_name, g_modbus_device_name, sizeof(modbus_device_name));
+    modbus_device_name[sizeof(modbus_device_name) - 1] = '\0';
+    memcpy(modbus_regs, g_modbus_regs, sizeof(modbus_regs));
+    g_modbus_pending = false;
+    pthread_mutex_unlock(&g_modbus_ui_mutex);
+
+    int modbus_tx = modbus_master_get_tx_count();
+    int modbus_rx = modbus_master_get_rx_count();
+    bool modbus_active = modbus_master_is_polling();
+    ui_page_modbus_update_tx(modbus_tx, true);
+    ui_page_modbus_update_rx(modbus_rx, modbus_rx > 0);
+    ui_page_modbus_set_led(modbus_active && modbus_rx > 0);
+    ui_page_modbus_set_poll_status(modbus_active, MODBUS_POLL_MS);
+    if (modbus_pending) {
+        ui_page_modbus_update_slave(modbus_slave_id, modbus_device_name,
+                                    modbus_reg_count, modbus_regs, true);
     }
-#endif
 
     /* CAN 页面刷新：所有 LVGL 调用都集中在主线程 */
     bool raw_pending, signal_pending;
@@ -642,6 +681,7 @@ static void services_init_timer_cb(lv_timer_t *timer)
         slv.poll_interval_ms = MODBUS_POLL_MS;
         strncpy(slv.device_name, "Temp/Humi Sensor", sizeof(slv.device_name) - 1);
         modbus_master_add_slave(&slv);
+        modbus_master_set_callback(modbus_recv_cb);
         modbus_master_start();
         LOG_INFO("Modbus master started");
     }
