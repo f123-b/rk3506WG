@@ -34,6 +34,8 @@ static modbus_data_callback_t user_callback = NULL;
 static pthread_t poll_thread;
 static atomic_bool running = false;
 static atomic_bool polling_enabled = true;
+static atomic_int tx_count = 0;
+static atomic_int rx_count = 0;
 static char dev_name[64];
 static int dev_baud;
 static int gpio_pin_num;
@@ -169,11 +171,13 @@ static void *modbus_poll_thread_func(void *arg)
         for (int i = 0; i < slave_count && atomic_load(&running); i++) {
             modbus_slave_config_t *slv = &slaves[i];
 
+            atomic_fetch_add(&tx_count, 1);
             int nb = modbus_read_regs_manual(
                 slv->slave_id, slv->func_code,
                 slv->start_addr, slv->nb_regs, regs);
 
             if (nb > 0) {
+                atomic_fetch_add(&rx_count, 1);
                 LOG_DEBUG("Modbus: slave %d (%s) read %d regs",
                           slv->slave_id, slv->device_name, nb);
 
@@ -277,6 +281,8 @@ int modbus_master_start(void)
 
     atomic_store(&running, true);
     atomic_store(&polling_enabled, true);
+    atomic_store(&tx_count, 0);
+    atomic_store(&rx_count, 0);
     if (pthread_create(&poll_thread, NULL, modbus_poll_thread_func, NULL) != 0) {
         LOG_ERROR("Modbus: thread create failed");
         atomic_store(&running, false);
@@ -310,4 +316,14 @@ void modbus_master_set_polling(bool enabled)
 bool modbus_master_is_polling(void)
 {
     return atomic_load(&polling_enabled);
+}
+
+int modbus_master_get_tx_count(void)
+{
+    return atomic_load(&tx_count);
+}
+
+int modbus_master_get_rx_count(void)
+{
+    return atomic_load(&rx_count);
 }
